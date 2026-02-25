@@ -1,4 +1,6 @@
-import React, { createContext, useState, useContext, ReactNode } from 'react';
+import React, { createContext, useState, useContext, ReactNode, useCallback } from 'react';
+
+const API_URL = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5000';
 
 interface ExtractedElement {
   id: string;
@@ -27,17 +29,6 @@ interface DeviationSelection {
   type: string;     // 'skip' | 'insertion' | 'Precedence' | 'Response' | etc.
 }
 
-interface FileContextType {
-  conformanceMode: ConformanceMode;
-  setConformanceMode: React.Dispatch<React.SetStateAction<ConformanceMode>>;
-  selectedDeviations: DeviationSelection[];
-  setSelectedDeviations: React.Dispatch<React.SetStateAction<DeviationSelection[]>>;
-  selectedDimensions: string[];
-  setSelectedDimensions: React.Dispatch<React.SetStateAction<string[]>>;
-}
-
-
-
 export interface AttributeConformanceItem {
   value: string;
   averageConformance: number;
@@ -46,15 +37,11 @@ export interface AttributeConformanceItem {
 
 export type AttributeConformanceMap = Record<string, AttributeConformanceItem[]>;
 
-
-
 export interface UniqueSequenceBin {
   bin: number;
   uniqueSequences: number;
   sequences: string[][];
 }
-
-
 
 interface ConformanceBin {
   averageConformance: number;
@@ -74,6 +61,36 @@ interface ActivityDeviationResult {
   total_traces: number;
 }
 
+// ── Filter state ─────────────────────────────────────────────────────────────
+
+export interface FilterSummary {
+  /** Case IDs to exclude (from step 1 anomaly/outlier selection) */
+  step1_exclude_ids: string[];
+  /** Activity sequences (as string arrays) to remove in step 1 variant filtering */
+  step1_variant_sequences: string[][];
+  /** Deviation columns whose affected cases should be removed (step 1b) */
+  step1b_remove_columns: string[];
+  /** Activity sequences (as string arrays) whose cases should be removed (step 3) */
+  step3_variant_sequences: string[][];
+}
+
+export interface FilterResult {
+  isFiltered: boolean;
+  originalCount: number;
+  filteredCount: number;
+  excludedCount: number;
+  excludedByStep: Record<string, string[]>;
+}
+
+const EMPTY_FILTER_SUMMARY: FilterSummary = {
+  step1_exclude_ids: [],
+  step1_variant_sequences: [],
+  step1b_remove_columns: [],
+  step3_variant_sequences: [],
+};
+
+// ── Context type ──────────────────────────────────────────────────────────────
+
 interface FileContextType {
   // Conformance mode
   conformanceMode: ConformanceMode;
@@ -82,7 +99,6 @@ interface FileContextType {
   // File contents
   bpmnFileContent: string | null;
   xesFileContent: string | null;
-
 
   amountConformanceData: any[];
   setAmountConformanceData: React.Dispatch<React.SetStateAction<any[]>>;
@@ -94,18 +110,14 @@ interface FileContextType {
   fitnessData: TraceFitness[];
   conformanceBins: ConformanceBin[];
 
-
-
-
   // Activity deviation stats
   activityDeviations: ActivityDeviationResult;
   outcomeBins: OutcomeBin[];
- desiredOutcomes: string[];
- matching_mode: string;
- attributeConformance: AttributeConformanceMap;
- uniqueSequences: UniqueSequenceBin[];
-setUniqueSequences: React.Dispatch<React.SetStateAction<UniqueSequenceBin[]>>;
-
+  desiredOutcomes: string[];
+  matching_mode: string;
+  attributeConformance: AttributeConformanceMap;
+  uniqueSequences: UniqueSequenceBin[];
+  setUniqueSequences: React.Dispatch<React.SetStateAction<UniqueSequenceBin[]>>;
 
   // Setters
   setBpmnFileContent: (content: string | null) => void;
@@ -119,23 +131,42 @@ setUniqueSequences: React.Dispatch<React.SetStateAction<UniqueSequenceBin[]>>;
   setmatching_mode: (mode: string) => void;
   setAttributeConformance: (data: AttributeConformanceMap) => void;
   traceSequences: TraceSequence[];
-setTraceSequences: React.Dispatch<React.SetStateAction<TraceSequence[]>>;
+  setTraceSequences: React.Dispatch<React.SetStateAction<TraceSequence[]>>;
 
   // Persisted dimension configuration from SelectDimensions
   dimensionConfigs: Record<string, any>;
   setDimensionConfigs: React.Dispatch<React.SetStateAction<Record<string, any>>>;
 
+  // Deviation selection
+  selectedDeviations: DeviationSelection[];
+  setSelectedDeviations: React.Dispatch<React.SetStateAction<DeviationSelection[]>>;
+  selectedDimensions: string[];
+  setSelectedDimensions: React.Dispatch<React.SetStateAction<string[]>>;
+
+  // Deviations identified as logging errors (excluded from Step 3 onwards)
+  loggingErrorDeviations: string[];
+  setLoggingErrorDeviations: React.Dispatch<React.SetStateAction<string[]>>;
+
+  // Filter / recompute state
+  filterSummary: FilterSummary;
+  setFilterSummary: React.Dispatch<React.SetStateAction<FilterSummary>>;
+  filterResult: FilterResult | null;
+  setFilterResult: React.Dispatch<React.SetStateAction<FilterResult | null>>;
+  /** Send full filter state to backend and recompute alignments. Returns the result object. */
+  applyAndRecompute: (summary: FilterSummary) => Promise<FilterResult>;
+  /** Clear all filters and restore original log. */
+  clearAllFilters: () => Promise<void>;
+
   // Reset everything
   resetAll: () => void;
-
-  // Outcome distribution
-
 }
 
-// Create context
+// ── Context ───────────────────────────────────────────────────────────────────
+
 const FileContext = createContext<FileContextType | undefined>(undefined);
 
-// Provider component
+// ── Provider ──────────────────────────────────────────────────────────────────
+
 export const FileProvider = ({ children }: { children: ReactNode }) => {
   const [conformanceMode, setConformanceMode] = useState<ConformanceMode>('bpmn');
   const [bpmnFileContent, setBpmnFileContent] = useState<string | null>(null);
@@ -148,19 +179,56 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
   const [selectedDimensions, setSelectedDimensions] = useState<string[]>([]);
   const [activityDeviations, setActivityDeviations] = useState<ActivityDeviationResult>({
     deviations: [],
-    total_traces: 0
+    total_traces: 0,
   });
   const [uniqueSequences, setUniqueSequences] = useState<UniqueSequenceBin[]>([]);
   const [amountConformanceData, setAmountConformanceData] = useState<any[]>([]);
   const [dimensionConfigs, setDimensionConfigs] = useState<Record<string, any>>({});
-
-
-
-  
+  const [loggingErrorDeviations, setLoggingErrorDeviations] = useState<string[]>([]);
   const [outcomeBins, setOutcomeBins] = useState<OutcomeBin[]>([]);
   const [desiredOutcomes, setDesiredOutcomes] = useState<string[]>([]);
   const [matching_mode, setmatching_mode] = useState<string>('');
   const [attributeConformance, setAttributeConformance] = useState<AttributeConformanceMap>({});
+
+  // Filter state
+  const [filterSummary, setFilterSummary] = useState<FilterSummary>(EMPTY_FILTER_SUMMARY);
+  const [filterResult, setFilterResult] = useState<FilterResult | null>(null);
+
+  const applyAndRecompute = useCallback(async (summary: FilterSummary): Promise<FilterResult> => {
+    const excluded_by_step: Record<string, string[]> = {
+      step1: summary.step1_exclude_ids,
+    };
+    // Merge step1 and step3 variant sequences for the backend
+    const allVariants = [...summary.step1_variant_sequences, ...summary.step3_variant_sequences];
+    const res = await fetch(`${API_URL}/api/recompute-filtered-log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        exclude_case_ids: summary.step1_exclude_ids,
+        deviations_to_remove_cases: summary.step1b_remove_columns,
+        variants_to_remove: allVariants,
+        excluded_by_step,
+      }),
+    });
+    const data = await res.json();
+    const result: FilterResult = {
+      isFiltered: (data.excluded_count ?? 0) > 0,
+      originalCount: data.original_count ?? 0,
+      filteredCount: data.filtered_count ?? 0,
+      excludedCount: data.excluded_count ?? 0,
+      excludedByStep: data.excluded_by_step ?? {},
+    };
+    setFilterSummary(summary);
+    setFilterResult(result);
+    return result;
+  }, []);
+
+  const clearAllFilters = useCallback(async () => {
+    const emptySummary = { ...EMPTY_FILTER_SUMMARY };
+    await applyAndRecompute(emptySummary);
+    setFilterSummary(emptySummary);
+    setFilterResult(null);
+  }, [applyAndRecompute]);
 
   const resetAll = () => {
     setConformanceMode('bpmn');
@@ -180,47 +248,37 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
     setmatching_mode('');
     setAttributeConformance({});
     setDimensionConfigs({});
+    setLoggingErrorDeviations([]);
+    setFilterSummary(EMPTY_FILTER_SUMMARY);
+    setFilterResult(null);
   };
 
   return (
     <FileContext.Provider
       value={{
-        conformanceMode,
-        setConformanceMode,
-        bpmnFileContent,
-        xesFileContent,
+        conformanceMode, setConformanceMode,
+        bpmnFileContent, xesFileContent,
         extractedElements,
-        setBpmnFileContent,
-        setXesFileContent,
-        setExtractedElements,
-        fitnessData,
-        setFitnessData,
-        conformanceBins,
-        setConformanceBins,
-        activityDeviations,
-        setActivityDeviations,
-        outcomeBins,
-setOutcomeBins,
-desiredOutcomes,
-setDesiredOutcomes,
-          matching_mode,
-          setmatching_mode,
-  attributeConformance,
-  setAttributeConformance,
-setUniqueSequences,
-  uniqueSequences,
-   amountConformanceData,
-  setAmountConformanceData,
-traceSequences,
-setTraceSequences,
-selectedDeviations,
-  setSelectedDeviations,
-  selectedDimensions,
-  setSelectedDimensions,
-  dimensionConfigs,
-  setDimensionConfigs,
-  resetAll,
-
+        setBpmnFileContent, setXesFileContent, setExtractedElements,
+        fitnessData, setFitnessData,
+        conformanceBins, setConformanceBins,
+        activityDeviations, setActivityDeviations,
+        outcomeBins, setOutcomeBins,
+        desiredOutcomes, setDesiredOutcomes,
+        matching_mode, setmatching_mode,
+        attributeConformance, setAttributeConformance,
+        setUniqueSequences, uniqueSequences,
+        amountConformanceData, setAmountConformanceData,
+        traceSequences, setTraceSequences,
+        selectedDeviations, setSelectedDeviations,
+        selectedDimensions, setSelectedDimensions,
+        dimensionConfigs, setDimensionConfigs,
+        loggingErrorDeviations, setLoggingErrorDeviations,
+        filterSummary, setFilterSummary,
+        filterResult, setFilterResult,
+        applyAndRecompute,
+        clearAllFilters,
+        resetAll,
       }}
     >
       {children}
@@ -228,7 +286,8 @@ selectedDeviations,
   );
 };
 
-// Hook for using context
+// ── Hook ──────────────────────────────────────────────────────────────────────
+
 export const useFileContext = (): FileContextType => {
   const context = useContext(FileContext);
   if (!context) {
@@ -236,8 +295,3 @@ export const useFileContext = (): FileContextType => {
   }
   return context;
 };
-
-
-
-
-

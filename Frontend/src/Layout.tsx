@@ -7,6 +7,8 @@ import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import { Outlet, useNavigate } from "react-router-dom";
 import { BottomNavProvider, useBottomNav } from "./BottomNavContext";
 import { useFileContext } from "./FileContext";
+import StepProgressBar from "./StepProgressBar";
+import FilterBanner from "./FilterBanner";
 
 const API_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
 
@@ -58,6 +60,12 @@ const LayoutInner: React.FC = () => {
           </Avatar>
         </Toolbar>
       </AppBar>
+
+      {/* Step progress bar */}
+      <StepProgressBar />
+
+      {/* Filter status banner */}
+      <FilterBanner />
 
       {/* Content — scrollable */}
       <Box sx={{ flex: 1, overflow: "auto" }}>

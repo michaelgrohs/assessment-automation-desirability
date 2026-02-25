@@ -48,7 +48,7 @@ const WelcomePage: React.FC = () => {
 
   useEffect(() => {
     if (isReady) {
-      setContinue({ label: "Next", onClick: () => navigate('/overview') });
+      setContinue({ label: "Next", onClick: () => navigate('/log-quality') });
     } else {
       setContinue(null);
     }

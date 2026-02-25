@@ -130,6 +130,25 @@ const SelectDimensions: React.FC = () => {
   // Compute dimensions (returns true on success)
   // ---------------------------
   const handleComputeDimensions = async (): Promise<boolean> => {
+    // Validate configs before sending
+    for (const dim of selectedDimensions) {
+      const cfg = configs[dim];
+      const ct = cfg?.computationType || 'existing';
+      const c = cfg?.config || {};
+      if (ct === 'existing' && !c.column) {
+        setComputeError(`Please select a column for dimension "${dim}".`);
+        return false;
+      }
+      if (ct === 'formula' && !c.expression?.trim()) {
+        setComputeError(`Please enter a formula expression for dimension "${dim}".`);
+        return false;
+      }
+      if (ct === 'rule' && (!c.column || !c.operator || c.value === undefined || c.value === '')) {
+        setComputeError(`Please complete the rule configuration for dimension "${dim}" (column, operator, and value required).`);
+        return false;
+      }
+    }
+
     try {
       setIsComputing(true);
       setComputeError(null);

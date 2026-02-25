@@ -78,12 +78,19 @@ last_uploaded_data = {
     "xes_log": None,
     "alignments": None,
     "deviation_matrix": None,
+    "original_deviation_matrix": None,
     "deviation_labels": None,
     "impact_matrix": None,
     "mode": "bpmn",
     "atoms": None,
     "atoms_df": None,
     "event_log_pa": None,
+    # Filtering state
+    "filtered_log": None,
+    "filtered_alignments": None,
+    "excluded_case_ids": [],
+    "excluded_by_step": {},
+    "is_filtered": False,
 }
 
 def reset_cache():
@@ -91,11 +98,17 @@ def reset_cache():
     last_uploaded_data["xes_log"] = None
     last_uploaded_data["alignments"] = None
     last_uploaded_data["deviation_matrix"] = None
+    last_uploaded_data["original_deviation_matrix"] = None
     last_uploaded_data["impact_matrix"] = None
     last_uploaded_data["mode"] = "bpmn"
     last_uploaded_data["atoms"] = None
     last_uploaded_data["atoms_df"] = None
     last_uploaded_data["event_log_pa"] = None
+    last_uploaded_data["filtered_log"] = None
+    last_uploaded_data["filtered_alignments"] = None
+    last_uploaded_data["excluded_case_ids"] = []
+    last_uploaded_data["excluded_by_step"] = {}
+    last_uploaded_data["is_filtered"] = False
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
@@ -144,10 +157,14 @@ def upload_files():
     last_uploaded_data['bpmn_path'] = bpmn_path
     last_uploaded_data['xes_path'] = xes_path
     last_uploaded_data['deviation_matrix'] = None
+    last_uploaded_data['original_deviation_matrix'] = None
     last_uploaded_data['impact_matrix'] = None
     last_uploaded_data['atoms'] = None
     last_uploaded_data['atoms_df'] = None
     last_uploaded_data['event_log_pa'] = None
+    last_uploaded_data['excluded_case_ids'] = []
+    last_uploaded_data['excluded_by_step'] = {}
+    last_uploaded_data['is_filtered'] = False
 
     # Parse BPMN
     bpmn_model = parse_bpmn(bpmn_path)
@@ -400,7 +417,11 @@ def upload_declarative():
     collect_data = collect_data[[c for c in ordered_cols if c in collect_data.columns]]
 
     last_uploaded_data['deviation_matrix'] = collect_data
+    last_uploaded_data['original_deviation_matrix'] = collect_data.copy()
     last_uploaded_data['mode'] = 'declarative'
+    last_uploaded_data['excluded_case_ids'] = []
+    last_uploaded_data['excluded_by_step'] = {}
+    last_uploaded_data['is_filtered'] = False
 
     print(f"Mined {len(atoms)} constraints, matrix shape: {collect_data.shape}")
 
@@ -447,6 +468,10 @@ def get_cached_deviation_matrix():
 
         last_uploaded_data["deviation_matrix"] = df
         last_uploaded_data["deviation_labels"] = labels
+
+        # Cache the original (unfiltered) matrix once
+        if last_uploaded_data.get("original_deviation_matrix") is None:
+            last_uploaded_data["original_deviation_matrix"] = df.copy()
 
         print("✅ Deviation matrix cached.")
         print("Shape:", df.shape)
@@ -1004,7 +1029,540 @@ def api_model_content():
         return jsonify({"error": f"Unsupported model type: {ext}"}), 400
 
 
+@app.route('/api/filtering-status', methods=['GET'])
+def get_filtering_status():
+    """Return current filtering state and per-step breakdown."""
+    original_log = last_uploaded_data.get('xes_log')
+    original_count = len(original_log) if original_log else 0
+    excluded_ids = last_uploaded_data.get('excluded_case_ids', [])
+    return jsonify({
+        "is_filtered": last_uploaded_data.get('is_filtered', False),
+        "original_count": original_count,
+        "filtered_count": original_count - len(excluded_ids),
+        "excluded_count": len(excluded_ids),
+        "excluded_by_step": last_uploaded_data.get('excluded_by_step', {}),
+    })
+
+
+@app.route('/api/recompute-filtered-log', methods=['POST'])
+def recompute_filtered_log():
+    """Filter the original log and recompute alignments/deviation matrix."""
+    import ast as _ast
+    from pm4py.objects.log.obj import EventLog as PM4PyLog
+
+    data = request.json or {}
+    exclude_ids_raw = data.get('exclude_case_ids', [])
+    deviations_to_remove = data.get('deviations_to_remove_cases', [])
+    variants_to_remove = data.get('variants_to_remove', [])   # list of activity-sequence lists
+    excluded_by_step = data.get('excluded_by_step', {})
+
+    original_log = last_uploaded_data.get('xes_log')
+    if original_log is None:
+        return jsonify({"error": "No log loaded"}), 400
+
+    mode = last_uploaded_data.get('mode', 'bpmn')
+    exclude_case_ids = set(str(i) for i in exclude_ids_raw)
+
+    # Ensure original deviation matrix is available
+    orig_matrix = last_uploaded_data.get('original_deviation_matrix')
+    if orig_matrix is None:
+        # Build and cache it for BPMN; for declarative it should already be set
+        if mode == 'bpmn':
+            orig_matrix = get_cached_deviation_matrix()
+            if last_uploaded_data.get('original_deviation_matrix') is None:
+                last_uploaded_data['original_deviation_matrix'] = orig_matrix.copy()
+        else:
+            orig_matrix = pd.DataFrame()
+
+    # Expand deviation-based exclusions
+    if deviations_to_remove and orig_matrix is not None and not orig_matrix.empty:
+        for col in deviations_to_remove:
+            if col in orig_matrix.columns and 'trace_id' in orig_matrix.columns:
+                affected = orig_matrix.loc[orig_matrix[col] == 1, 'trace_id'].astype(str)
+                exclude_case_ids.update(affected.tolist())
+                if 'step1b' not in excluded_by_step:
+                    excluded_by_step['step1b'] = []
+                excluded_by_step['step1b'].extend(affected.tolist())
+
+    # Expand variant-based exclusions
+    if variants_to_remove and orig_matrix is not None and not orig_matrix.empty:
+        if 'activities' in orig_matrix.columns and 'trace_id' in orig_matrix.columns:
+            variant_tuples = {tuple(v) for v in variants_to_remove if isinstance(v, list)}
+            for _, row in orig_matrix.iterrows():
+                acts = row.get('activities', [])
+                if isinstance(acts, str):
+                    try:
+                        acts = _ast.literal_eval(acts)
+                    except Exception:
+                        acts = []
+                if isinstance(acts, list) and tuple(acts) in variant_tuples:
+                    cid = str(row.get('trace_id', ''))
+                    exclude_case_ids.add(cid)
+                    if 'step3' not in excluded_by_step:
+                        excluded_by_step['step3'] = []
+                    excluded_by_step['step3'].append(cid)
+
+    original_count = len(original_log)
+
+    # Build filtered log from original (skip log-level attribute copy — not used downstream)
+    filtered_log = PM4PyLog()
+    for trace in original_log:
+        cid = str(trace.attributes.get('concept:name', ''))
+        if cid not in exclude_case_ids:
+            filtered_log.append(trace)
+
+    filtered_count = len(filtered_log)
+    excluded_count = original_count - filtered_count
+
+    last_uploaded_data['filtered_log'] = filtered_log
+    last_uploaded_data['excluded_case_ids'] = list(exclude_case_ids)
+    last_uploaded_data['excluded_by_step'] = excluded_by_step
+    last_uploaded_data['is_filtered'] = excluded_count > 0
+    last_uploaded_data['impact_matrix'] = None   # invalidate downstream
+
+    if mode == 'bpmn':
+        bpmn_path = last_uploaded_data.get('bpmn_path')
+        if not bpmn_path:
+            return jsonify({"error": "No BPMN model loaded"}), 400
+
+        print(f"⚙️ Recomputing alignments for {filtered_count} traces…")
+        filtered_alignments = calculate_alignments(bpmn_path, filtered_log)
+        last_uploaded_data['filtered_alignments'] = filtered_alignments
+
+        df, labels = build_trace_deviation_matrix_df(filtered_log, filtered_alignments)
+        last_uploaded_data['deviation_matrix'] = df
+        last_uploaded_data['deviation_labels'] = labels
+        print(f"✅ Filtered deviation matrix shape: {df.shape}")
+
+        return jsonify({
+            "original_count": original_count,
+            "filtered_count": filtered_count,
+            "excluded_count": excluded_count,
+            "alignment_count": len(filtered_alignments),
+        })
+
+    else:  # declarative — filter rows from original matrix
+        if orig_matrix is not None and not orig_matrix.empty and 'trace_id' in orig_matrix.columns:
+            filtered_matrix = orig_matrix[
+                ~orig_matrix['trace_id'].astype(str).isin(exclude_case_ids)
+            ].copy()
+        else:
+            filtered_matrix = orig_matrix.copy() if orig_matrix is not None else pd.DataFrame()
+
+        last_uploaded_data['deviation_matrix'] = filtered_matrix
+        return jsonify({
+            "original_count": original_count,
+            "filtered_count": filtered_count,
+            "excluded_count": excluded_count,
+        })
+
+
+@app.route('/api/log-quality', methods=['GET'])
+def get_log_quality():
+    """Return data quality metrics for the uploaded event log, including outlier detection."""
+    log = last_uploaded_data.get("xes_log")
+    if log is None:
+        return jsonify({"error": "No log loaded"}), 400
+
+    import ast
+    from collections import Counter
+
+    total_traces = len(log)
+    total_events = sum(len(trace) for trace in log)
+
+    # Collect all attribute names
+    trace_attr_names = set()
+    event_attr_names = set()
+    for trace in log:
+        for key in trace.attributes:
+            if key != 'concept:name':
+                trace_attr_names.add(key)
+        for event in trace:
+            for key in event:
+                event_attr_names.add(key)
+
+    def is_missing(val):
+        return val is None or (isinstance(val, str) and val.strip() == '')
+
+    # Missing values per trace attribute
+    trace_attributes = []
+    for attr in sorted(trace_attr_names):
+        missing = sum(1 for trace in log if is_missing(trace.attributes.get(attr)))
+        trace_attributes.append({
+            "name": attr,
+            "missing_count": missing,
+            "missing_percentage": round(missing / total_traces * 100, 1) if total_traces > 0 else 0
+        })
+
+    # Missing values per event attribute
+    event_attributes = []
+    for attr in sorted(event_attr_names):
+        missing = sum(1 for trace in log for event in trace if is_missing(event.get(attr)))
+        event_attributes.append({
+            "name": attr,
+            "missing_count": missing,
+            "missing_percentage": round(missing / total_events * 100, 1) if total_events > 0 else 0
+        })
+
+    # Timestamp anomalies (out-of-order events within a trace)
+    out_of_order_ids = []
+    for trace in log:
+        timestamps = [event['time:timestamp'] for event in trace if 'time:timestamp' in event and event['time:timestamp'] is not None]
+        for i in range(1, len(timestamps)):
+            if timestamps[i] < timestamps[i - 1]:
+                out_of_order_ids.append(str(trace.attributes.get('concept:name', 'unknown')))
+                break
+
+    # Duplicate case IDs
+    case_ids = [str(trace.attributes.get('concept:name', '')) for trace in log]
+    id_counts = Counter(case_ids)
+    duplicate_ids = [cid for cid, cnt in id_counts.items() if cnt > 1]
+
+    # Trace length stats
+    trace_lengths = [len(trace) for trace in log]
+
+    # Trace duration stats
+    durations = []
+    for trace in log:
+        events = list(trace)
+        if len(events) >= 2:
+            start = events[0].get('time:timestamp')
+            end = events[-1].get('time:timestamp')
+            if start and end:
+                durations.append(abs((end - start).total_seconds()))
+
+    def safe_stats(vals):
+        if not vals:
+            return {"min": 0, "max": 0, "mean": 0, "median": 0}
+        sv = sorted(vals)
+        return {
+            "min": round(sv[0], 1),
+            "max": round(sv[-1], 1),
+            "mean": round(sum(vals) / len(vals), 1),
+            "median": round(sv[len(sv) // 2], 1)
+        }
+
+    # ── Outlier detection (Z-score, all traces, computed from XES log directly) ─
+    # Collect per-trace duration and event count
+    trace_durations = {}   # case_id -> seconds
+    trace_lengths_map = {} # case_id -> event count
+    for trace in log:
+        cid = str(trace.attributes.get('concept:name', ''))
+        trace_lengths_map[cid] = len(trace)
+        events = list(trace)
+        if len(events) >= 2:
+            start = events[0].get('time:timestamp')
+            end = events[-1].get('time:timestamp')
+            if start and end:
+                trace_durations[cid] = abs((end - start).total_seconds())
+
+    duration_outliers = []
+    if len(trace_durations) >= 4:
+        dur_vals = list(trace_durations.values())
+        mean_d = sum(dur_vals) / len(dur_vals)
+        std_d = (sum((v - mean_d) ** 2 for v in dur_vals) / len(dur_vals)) ** 0.5
+        if std_d > 0:
+            for cid, val in trace_durations.items():
+                z = (val - mean_d) / std_d
+                if abs(z) > 3:
+                    duration_outliers.append({
+                        "case_id": cid,
+                        "value_seconds": round(val, 1),
+                        "z_score": round(z, 2)
+                    })
+
+    length_outliers = []
+    count_vals = list(trace_lengths_map.values())
+    if len(count_vals) >= 4:
+        mean_l = sum(count_vals) / len(count_vals)
+        std_l = (sum((v - mean_l) ** 2 for v in count_vals) / len(count_vals)) ** 0.5
+        if std_l > 0:
+            for cid, cnt in trace_lengths_map.items():
+                z = (cnt - mean_l) / std_l
+                if abs(z) > 3:
+                    length_outliers.append({
+                        "case_id": cid,
+                        "value": cnt,
+                        "z_score": round(z, 2)
+                    })
+
+    # Sort by |z_score| descending — no cap (all outliers returned)
+    duration_outliers.sort(key=lambda x: -abs(x["z_score"]))
+    length_outliers.sort(key=lambda x: -abs(x["z_score"]))
+
+    return jsonify({
+        "total_traces": total_traces,
+        "total_events": total_events,
+        "trace_attributes": sorted(trace_attributes, key=lambda x: -x["missing_count"]),
+        "event_attributes": sorted(event_attributes, key=lambda x: -x["missing_count"]),
+        "timestamp_anomalies": {
+            "out_of_order_count": len(out_of_order_ids),
+            "out_of_order_case_ids": out_of_order_ids[:20]
+        },
+        "duplicate_case_ids": duplicate_ids[:20],
+        "trace_length_stats": safe_stats(trace_lengths),
+        "trace_duration_stats": safe_stats(durations),
+        "duration_outliers": duration_outliers,
+        "length_outliers": length_outliers
+    })
+
+
+@app.route('/api/filter-traces', methods=['POST'])
+def filter_traces():
+    """Optionally filter anomalous cases out of the deviation matrix."""
+    data = request.json or {}
+    filters = data.get('filters', {})
+
+    matrix = get_cached_deviation_matrix()
+    if matrix is None or matrix.empty:
+        return jsonify({"error": "No deviation matrix available"}), 400
+
+    original_count = len(matrix)
+    filtered = matrix.copy()
+
+    exclude_ids = set()
+    if filters.get('exclude_out_of_order'):
+        exclude_ids.update(str(i) for i in (filters.get('out_of_order_ids') or []))
+    if filters.get('exclude_duplicates'):
+        exclude_ids.update(str(i) for i in (filters.get('duplicate_ids') or []))
+    # Direct list of trace IDs to exclude (used for outlier removal)
+    if filters.get('exclude_ids'):
+        exclude_ids.update(str(i) for i in filters['exclude_ids'])
+
+    if exclude_ids and 'trace_id' in filtered.columns:
+        filtered = filtered[~filtered['trace_id'].astype(str).isin(exclude_ids)]
+
+    last_uploaded_data["deviation_matrix"] = filtered
+
+    return jsonify({
+        "original_count": original_count,
+        "filtered_count": len(filtered),
+        "excluded_count": original_count - len(filtered)
+    })
+
+
+@app.route('/api/process-variants', methods=['GET'])
+def get_process_variants():
+    """Return all unique process variants (activity sequences) with case counts."""
+    import ast as _ast
+    from collections import Counter
+
+    # Prefer original (unfiltered) matrix so variants aren't missing after filters applied
+    matrix = (last_uploaded_data.get('original_deviation_matrix')
+              or last_uploaded_data.get('deviation_matrix'))
+    log = last_uploaded_data.get('xes_log')
+
+    if matrix is not None and not matrix.empty and 'activities' in matrix.columns:
+        total = len(matrix)
+        variant_counter: Counter = Counter()
+        for val in matrix['activities']:
+            if isinstance(val, list):
+                key = tuple(val)
+            elif isinstance(val, str):
+                try:
+                    key = tuple(_ast.literal_eval(val))
+                except Exception:
+                    key = ()
+            else:
+                key = ()
+            variant_counter[key] += 1
+
+        variants = [
+            {
+                "sequence": list(seq),
+                "count": cnt,
+                "percentage": round(cnt / total * 100, 1) if total > 0 else 0,
+            }
+            for seq, cnt in variant_counter.most_common()
+            if seq
+        ]
+        return jsonify({"variants": variants, "total_traces": total})
+
+    elif log is not None:
+        # Fallback: compute directly from the XES log
+        total = len(log)
+        variant_counter = Counter()
+        for trace in log:
+            key = tuple(event.get('concept:name', '') for event in trace)
+            variant_counter[key] += 1
+
+        variants = [
+            {
+                "sequence": list(seq),
+                "count": cnt,
+                "percentage": round(cnt / total * 100, 1) if total > 0 else 0,
+            }
+            for seq, cnt in variant_counter.most_common()
+            if seq
+        ]
+        return jsonify({"variants": variants, "total_traces": total})
+
+    return jsonify({"variants": [], "total_traces": 0})
+
+
+@app.route('/api/model-check', methods=['GET'])
+def get_model_check():
+    """Return model suitability metrics: fitness, precision, activity comparison."""
+    mode = last_uploaded_data.get('mode', 'bpmn')
+
+    if mode == 'declarative':
+        log = last_uploaded_data.get('xes_log')
+        atoms_df = last_uploaded_data.get('atoms_df')
+        deviation_matrix = last_uploaded_data.get('deviation_matrix')
+
+        if log is None:
+            return jsonify({"error": "No log loaded"}), 400
+
+        total_traces = len(log)
+        activities_in_log = set()
+        for trace in log:
+            for event in trace:
+                act = event.get('concept:name')
+                if act:
+                    activities_in_log.add(act)
+
+        total_constraints = len(atoms_df) if atoms_df is not None else 0
+        constraint_violation_rate = None
+        if deviation_matrix is not None and not deviation_matrix.empty and total_constraints > 0:
+            non_meta = {'trace_id', 'trace_duration_seconds', 'activities'}
+            dev_cols = [c for c in deviation_matrix.columns if c not in non_meta and
+                        set(deviation_matrix[c].dropna().unique()).issubset({0, 1, 0.0, 1.0})]
+            if dev_cols:
+                n_violated = int(deviation_matrix[dev_cols].any(axis=1).sum())
+                constraint_violation_rate = round(n_violated / len(deviation_matrix), 4)
+
+        return jsonify({
+            "mode": "declarative",
+            "total_traces": total_traces,
+            "total_constraints": total_constraints,
+            "constraint_violation_rate": constraint_violation_rate,
+            "activities_in_log": sorted(activities_in_log)
+        })
+
+    # BPMN mode
+    if not last_uploaded_data.get('bpmn_path') or not last_uploaded_data.get('xes_log'):
+        return jsonify({"error": "No BPMN model or log loaded"}), 400
+
+    log = last_uploaded_data['xes_log']
+    bpmn_path = last_uploaded_data['bpmn_path']
+
+    # Fitness from stored alignments
+    aligned_traces = get_cached_alignments()
+    fitness_values = [t.get('fitness', 0) for t in aligned_traces]
+    avg_fitness = round(sum(fitness_values) / len(fitness_values), 4) if fitness_values else 0
+
+    # Precision
+    precision = None
+    try:
+        from process_mining.conformance_alignments import read_model_as_petri_net
+        net, im, fm = read_model_as_petri_net(bpmn_path)
+        precision_val = pm4py.precision_alignments(log, net, im, fm)
+        precision = round(float(precision_val), 4)
+    except Exception as e:
+        print(f"Precision computation failed: {e}")
+
+    # Activities
+    activities_in_model = set(get_all_activities_from_model(bpmn_path))
+    activities_in_log = set()
+    for trace in log:
+        for event in trace:
+            act = event.get('concept:name')
+            if act:
+                activities_in_log.add(act)
+
+    return jsonify({
+        "mode": "bpmn",
+        "fitness": avg_fitness,
+        "precision": precision,
+        "total_traces": len(log),
+        "activities_only_in_model": sorted(activities_in_model - activities_in_log),
+        "activities_only_in_log": sorted(activities_in_log - activities_in_model),
+        "activities_in_both": sorted(activities_in_model & activities_in_log)
+    })
+
+
+@app.route('/api/deviation-selection', methods=['GET'])
+def get_deviation_selection():
+    """Return deviations with affected case counts and top process variants per deviation."""
+    import ast
+    from collections import Counter
+
+    matrix = get_cached_deviation_matrix()
+    mode = last_uploaded_data.get('mode', 'bpmn')
+
+    if matrix is None or matrix.empty:
+        return jsonify({"error": "No deviation matrix available"}), 400
+
+    total_traces = len(matrix)
+    non_meta = {'trace_id', 'trace_duration_seconds', 'activities'}
+
+    if mode == 'bpmn':
+        dev_cols = [c for c in matrix.columns if c.startswith('(Skip ') or c.startswith('(Insert ')]
+    else:
+        dev_cols = []
+        for col in matrix.columns:
+            if col in non_meta:
+                continue
+            unique_vals = set(matrix[col].dropna().unique())
+            if unique_vals.issubset({0, 1, 0.0, 1.0}) and '_' in col:
+                dev_cols.append(col)
+
+    deviations = []
+    for col in dev_cols:
+        affected_mask = matrix[col] == 1
+        affected_count = int(affected_mask.sum())
+        if affected_count == 0:
+            continue
+
+        affected_pct = round(affected_count / total_traces * 100, 1)
+
+        top_variants = []
+        if 'activities' in matrix.columns:
+            variant_counts = Counter()
+            for acts in matrix.loc[affected_mask, 'activities']:
+                if isinstance(acts, list):
+                    variant_counts[tuple(acts)] += 1
+                elif isinstance(acts, str):
+                    try:
+                        variant_counts[tuple(ast.literal_eval(acts))] += 1
+                    except Exception:
+                        pass
+
+            top_variants = [
+                {
+                    "sequence": list(seq),
+                    "count": cnt,
+                    "percentage": round(cnt / affected_count * 100, 1)
+                }
+                for seq, cnt in variant_counts.most_common(10)
+            ]
+
+        if col.startswith('(Skip '):
+            label = f"Skip: {col[6:-1]}"
+            dev_type = "skip"
+        elif col.startswith('(Insert '):
+            label = f"Insert: {col[8:-1]}"
+            dev_type = "insertion"
+        else:
+            parts = col.split('_', 2)
+            dev_type = parts[0]
+            label = f"{parts[0]}: {parts[1]} \u2192 {parts[2]}" if len(parts) == 3 else col
+
+        deviations.append({
+            "column": col,
+            "label": label,
+            "type": dev_type,
+            "affected_count": affected_count,
+            "affected_percentage": affected_pct,
+            "top_variants": top_variants
+        })
+
+    deviations.sort(key=lambda x: -x["affected_count"])
+
+    return jsonify({"deviations": deviations, "total_traces": total_traces})
+
+
 if __name__ == '__main__':
-    print("🚀 Flask backend running at: http://localhost:1904")
-    app.run(host="0.0.0.0", port=1904, debug=True, use_reloader=False, threaded=True)
+    print("🚀 Flask backend running at: http://localhost:1965")
+    app.run(host="0.0.0.0", port=1965, debug=True, use_reloader=False, threaded=True)
     reset_cache()

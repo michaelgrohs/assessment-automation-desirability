@@ -2,7 +2,7 @@
   "name": "my-app",
   "version": "0.1.0",
   "private": true,
-  "proxy": "http://localhost:1904",
+  "proxy": "http://localhost:1965",
   "overrides": {
     "webpack-dev-server": "4.13.3"
   },
@@ -44,7 +44,7 @@
   },
   "scripts": {
     "start": "concurrently \"npm run backend\" \"npm run frontend\"",
-    "frontend": "react-scripts start",
+    "frontend": "PORT=2004 react-scripts start",
     "backend": "cd ../Backend && PYTHONUNBUFFERED=1 ../.venv/bin/python app.py"
   },
   "eslintConfig": {

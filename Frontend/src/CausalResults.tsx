@@ -389,61 +389,90 @@ const CausalResults: React.FC = () => {
 
       <Divider sx={{ my: 3 }} />
 
-      <Table size="small">
-        <TableHead>
-          <TableRow>
-            <TableCell>Dimension</TableCell>
-            {deviations.map((dev) => (
-              <TableCell key={dev} align="center">
-                {dev}
+      <Box sx={{ overflowX: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+        <Table size="small" sx={{ minWidth: 400, tableLayout: 'auto' }}>
+          <TableHead>
+            <TableRow>
+              <TableCell
+                sx={{
+                  position: 'sticky',
+                  left: 0,
+                  zIndex: 3,
+                  background: '#f5f5f5',
+                  fontWeight: 700,
+                  minWidth: 120,
+                  borderRight: '2px solid',
+                  borderColor: 'divider',
+                }}
+              >
+                Dimension
               </TableCell>
-            ))}
-          </TableRow>
-        </TableHead>
-
-        <TableBody>
-          {dimensions.map((dim) => (
-            <TableRow key={dim}>
-              <TableCell>
-                <strong>{dim}</strong>
-              </TableCell>
-
-              {deviations.map((dev) => {
-                const result = results.find(
-                  (r) => r.dimension === dim && r.deviation === dev
-                );
-
-                if (!result) return <TableCell key={dev} />;
-
-                const bgColor = getCellColor(dim, result.ate, maxAbsEffect);
-
-                return (
-                  <Tooltip
-                    key={dev}
-                    title={result.ate !== undefined ? getAteTooltip(dim, dev, result.ate) : ""}
-                    arrow
-                    placement="top"
-                  >
-                    <TableCell
-                      align="center"
-                      style={{ backgroundColor: bgColor, minWidth: 80, cursor: "help" }}
-                    >
-                      <Typography variant="body2" sx={{ fontWeight: "bold" }}>
-                        {result.ate !== undefined
-                          ? result.ate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                          : "-"}{" "}
-                        <Typography component="span" variant="caption">
-                          ({result.p_value !== undefined ? result.p_value.toFixed(3) : "-"})
-                        </Typography>
-                      </Typography>
-                    </TableCell>
-                  </Tooltip>
-                );
-              })}
+              {deviations.map((dev) => (
+                <TableCell
+                  key={dev}
+                  align="center"
+                  sx={{ minWidth: 120, maxWidth: 200, whiteSpace: 'normal', wordBreak: 'break-word' }}
+                >
+                  {dev}
+                </TableCell>
+              ))}
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHead>
+
+          <TableBody>
+            {dimensions.map((dim) => (
+              <TableRow key={dim}>
+                <TableCell
+                  sx={{
+                    position: 'sticky',
+                    left: 0,
+                    zIndex: 2,
+                    background: '#fafafa',
+                    borderRight: '2px solid',
+                    borderColor: 'divider',
+                    fontWeight: 'bold',
+                  }}
+                >
+                  <strong>{dim}</strong>
+                </TableCell>
+
+                {deviations.map((dev) => {
+                  const result = results.find(
+                    (r) => r.dimension === dim && r.deviation === dev
+                  );
+
+                  if (!result) return <TableCell key={dev} />;
+
+                  const bgColor = getCellColor(dim, result.ate, maxAbsEffect);
+
+                  return (
+                    <Tooltip
+                      key={dev}
+                      title={result.ate !== undefined ? getAteTooltip(dim, dev, result.ate) : ""}
+                      arrow
+                      placement="top"
+                    >
+                      <TableCell
+                        align="center"
+                        style={{ backgroundColor: bgColor, minWidth: 120, cursor: "help" }}
+                      >
+                        <Typography variant="body2" sx={{ fontWeight: "bold" }}>
+                          {result.ate !== undefined
+                            ? result.ate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                            : "-"}{" "}
+                          <Typography component="span" variant="caption">
+                            ({result.p_value !== undefined ? result.p_value.toFixed(3) : "-"})
+                          </Typography>
+                        </Typography>
+                      </TableCell>
+                    </Tooltip>
+                  );
+                })}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </Box>
 
       {/* Criticality configurator */}
       <Box mt={6}>
