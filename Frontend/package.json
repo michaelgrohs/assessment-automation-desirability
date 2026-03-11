@@ -45,7 +45,7 @@
   "scripts": {
     "start": "concurrently \"npm run backend\" \"npm run frontend\"",
     "frontend": "PORT=2004 react-scripts start",
-    "backend": "cd ../Backend && PYTHONUNBUFFERED=1 ../.venv/bin/python app.py"
+    "backend": "cd ../Backend && PYTHONUNBUFFERED=1 arch -arm64 ../.venv/bin/python app.py"
   },
   "eslintConfig": {
     "extends": [

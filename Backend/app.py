@@ -74,6 +74,7 @@ last_uploaded_files = {
 last_uploaded_data = {
     "bpmn_path": None,
     "xes_path": None,
+    "decl_path": None,
     "bpmn_model": None,
     "xes_log": None,
     "alignments": None,
@@ -85,6 +86,12 @@ last_uploaded_data = {
     "atoms": None,
     "atoms_df": None,
     "event_log_pa": None,
+    "mined_decl_path": None,
+    "decl_constraint_info": None,
+    "violation_diagnostics": None,
+    "trace_time_deltas": None,
+    "alignment_status": "idle",
+    "alignment_error": None,
     # Filtering state
     "filtered_log": None,
     "filtered_alignments": None,
@@ -104,6 +111,13 @@ def reset_cache():
     last_uploaded_data["atoms"] = None
     last_uploaded_data["atoms_df"] = None
     last_uploaded_data["event_log_pa"] = None
+    last_uploaded_data["mined_decl_path"] = None
+    last_uploaded_data["decl_path"] = None
+    last_uploaded_data["decl_constraint_info"] = None
+    last_uploaded_data["violation_diagnostics"] = None
+    last_uploaded_data["trace_time_deltas"] = None
+    last_uploaded_data["alignment_status"] = "idle"
+    last_uploaded_data["alignment_error"] = None
     last_uploaded_data["filtered_log"] = None
     last_uploaded_data["filtered_alignments"] = None
     last_uploaded_data["excluded_case_ids"] = []
@@ -193,6 +207,165 @@ def upload_files():
     return jsonify({
         "message": "Files uploaded and alignments computed",
         "alignment_count": len(alignments)
+    })
+
+
+def validate_xes_log(xes_log):
+    """
+    Check that the parsed pm4py EventLog has the required fields.
+    Returns a list of human-readable error strings (empty = valid).
+    """
+    errors = []
+    missing_case_id = []
+    missing_concept = []
+    missing_timestamp = []
+
+    for i, trace in enumerate(xes_log):
+        if 'concept:name' not in trace.attributes:
+            missing_case_id.append(i)
+        for j, event in enumerate(trace):
+            if 'concept:name' not in event:
+                missing_concept.append((i, j))
+            if 'time:timestamp' not in event:
+                missing_timestamp.append((i, j))
+
+    if missing_case_id:
+        sample = missing_case_id[:3]
+        errors.append(
+            f"Missing 'case:concept:name' on {len(missing_case_id)} trace(s) "
+            f"(e.g. trace indices {sample}). Every trace must have a case ID."
+        )
+    if missing_concept:
+        sample = missing_concept[:3]
+        errors.append(
+            f"Missing 'concept:name' on {len(missing_concept)} event(s) "
+            f"(e.g. {sample}). Every event must have an activity name."
+        )
+    if missing_timestamp:
+        sample = missing_timestamp[:3]
+        errors.append(
+            f"Missing 'time:timestamp' on {len(missing_timestamp)} event(s) "
+            f"(e.g. {sample}). Every event must have a timestamp."
+        )
+    return errors
+
+
+def _compute_alignments_background():
+    """Run alignment computation in a background thread (called after mining is done)."""
+    last_uploaded_data['alignment_status'] = 'computing'
+    last_uploaded_data['alignment_error'] = None
+    try:
+        log = get_cached_xes_log()
+        aligned_traces = calculate_alignments(
+            last_uploaded_data['bpmn_path'], log
+        )
+        last_uploaded_data['alignments'] = aligned_traces
+        last_uploaded_data['alignment_status'] = 'ready'
+        print(f"Background alignments done: {len(aligned_traces)} traces")
+    except Exception as e:
+        last_uploaded_data['alignment_status'] = 'error'
+        last_uploaded_data['alignment_error'] = str(e)
+        print(f"Background alignment error: {e}")
+
+
+def _mine_and_align_background(algorithm, noise_threshold, xes_path, upload_folder, log_stem):
+    """Mine process model via subprocess (avoids fork-in-thread deadlock on macOS), then compute alignments."""
+    import subprocess
+    try:
+        print(f"[bg] Mining model with algorithm={algorithm}, noise_threshold={noise_threshold}", flush=True)
+        mined_models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mined_models')
+        os.makedirs(mined_models_dir, exist_ok=True)
+        bpmn_path = os.path.join(mined_models_dir, f'{log_stem}_{algorithm}.bpmn')
+        worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'process_mining', 'mine_worker.py')
+        args_json = json.dumps({
+            'algorithm': algorithm,
+            'noise_threshold': noise_threshold,
+            'xes_path': os.path.abspath(xes_path),
+            'bpmn_path': os.path.abspath(bpmn_path),
+        })
+        proc = subprocess.Popen(
+            [sys.executable, worker_script, args_json],
+            stdin=subprocess.DEVNULL,
+        )
+        returncode = proc.wait(timeout=600)
+        if returncode != 0:
+            raise RuntimeError(f'Mining subprocess exited with code {returncode}')
+
+        last_uploaded_data['bpmn_path'] = bpmn_path
+        print(f"[bg] Mining done, starting alignments", flush=True)
+        _compute_alignments_background()
+    except Exception as e:
+        last_uploaded_data['alignment_status'] = 'error'
+        last_uploaded_data['alignment_error'] = str(e)
+        print(f"[bg] Mining error: {e}", flush=True)
+
+
+@app.route('/api/alignment-status', methods=['GET'])
+def alignment_status_route():
+    return jsonify({
+        "status": last_uploaded_data.get('alignment_status', 'idle'),
+        "error": last_uploaded_data.get('alignment_error'),
+    })
+
+
+@app.route('/upload-mine-model', methods=['POST'])
+def upload_mine_model():
+    """Mine a process model from the event log and compute trace alignments."""
+    xes_file = request.files.get('xes')
+    if not xes_file:
+        return jsonify({"error": "Missing event log file"}), 400
+
+    algorithm = request.form.get('algorithm', 'inductive_infrequent')
+    noise_threshold = float(request.form.get('noise_threshold', '0.2'))
+
+    upload_folder = 'uploads'
+    os.makedirs(upload_folder, exist_ok=True)
+
+    raw_name = os.path.basename(xes_file.filename)
+    log_stem = raw_name.split('.')[0].replace(' ', '_')
+
+    xes_path = os.path.join(upload_folder, xes_file.filename)
+    xes_file.save(xes_path)
+
+    _, ext = os.path.splitext(xes_path)
+    if ext == '.csv':
+        log_csv = pd.read_csv(xes_path, encoding='utf-8-sig')
+        log_csv['time:timestamp'] = pd.to_datetime(log_csv['time:timestamp'], utc=True)
+        xes_log = log_converter.apply(log_csv)
+    elif ext in ('.xes', '.gz'):
+        xes_log = xes_importer.apply(xes_path)
+    else:
+        return jsonify({"error": f"Unsupported log format: {ext}"}), 400
+
+    xes_errors = validate_xes_log(xes_log)
+    if xes_errors:
+        return jsonify({"error": "Invalid XES log:\n" + "\n".join(xes_errors)}), 400
+
+    last_uploaded_data['bpmn_path'] = None
+    last_uploaded_data['xes_path'] = xes_path
+    last_uploaded_data['xes_log'] = xes_log
+    last_uploaded_data['bpmn_model'] = None
+    last_uploaded_data['deviation_matrix'] = None
+    last_uploaded_data['impact_matrix'] = None
+    last_uploaded_data['alignments'] = None
+    last_uploaded_data['atoms'] = None
+    last_uploaded_data['atoms_df'] = None
+    last_uploaded_data['event_log_pa'] = None
+    last_uploaded_data['mode'] = 'bpmn'
+    last_uploaded_data['alignment_status'] = 'mining'
+    last_uploaded_data['alignment_error'] = None
+
+    import threading
+    t = threading.Thread(
+        target=_mine_and_align_background,
+        args=(algorithm, noise_threshold, xes_path, upload_folder, log_stem),
+        daemon=True,
+    )
+    t.start()
+
+    return jsonify({
+        "message": f"Mining started ({algorithm})",
+        "algorithm": algorithm,
     })
 
 
@@ -425,12 +598,25 @@ def upload_declarative():
 
     print(f"Mined {len(atoms)} constraints, matrix shape: {collect_data.shape}")
 
+    # Save mined model as .decl to mined_models/
+    mined_models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mined_models')
+    os.makedirs(mined_models_dir, exist_ok=True)
+    log_stem = os.path.splitext(os.path.basename(last_uploaded_data.get('xes_path', 'log.xes')))[0].replace(' ', '_')
+    decl_filename = f"{log_stem}_mined.decl"
+    decl_save_path = os.path.join(mined_models_dir, decl_filename)
+    decl_content = _atoms_to_decl_string(atoms)
+    with open(decl_save_path, 'w', encoding='utf-8') as f:
+        f.write(decl_content)
+    last_uploaded_data['mined_decl_path'] = decl_save_path
+    print(f"Saved mined .decl to {decl_save_path}")
+
     atom_summary = atoms_df.to_dict(orient="records") if len(atoms_df) > 0 else []
 
     return jsonify({
         "message": "Declarative constraints mined successfully",
         "constraint_count": len(atoms),
-        "atom_summary": atom_summary
+        "atom_summary": atom_summary,
+        "decl_filename": decl_filename,
     })
 
 
@@ -438,8 +624,11 @@ def get_cached_impact_matrix():
     return last_uploaded_data.get("impact_matrix")
 
 def get_cached_alignments():
+    import time
+    # Wait for background computation if it is in progress
+    while last_uploaded_data.get('alignment_status') == 'computing':
+        time.sleep(0.5)
     if last_uploaded_data['alignments'] is None:
-
         last_uploaded_data['alignments'] = calculate_alignments(
             last_uploaded_data['bpmn_path'],
             get_cached_xes_log()
@@ -479,6 +668,581 @@ def get_cached_deviation_matrix():
     return last_uploaded_data["deviation_matrix"]
 
 
+def _atoms_to_decl_string(atoms) -> str:
+    """
+    Serialize a list of ProcessAtom objects to Declare4Py-compatible .decl format.
+    """
+    _unary_types = {"Existence", "Absence", "Exactly", "Init", "End"}
+    _cardinality_types = {"Existence", "Absence", "Exactly"}
+
+    activities: set = set()
+    for atom in atoms:
+        for op in atom.operands:
+            activities.add(op)
+
+    lines = []
+    for act in sorted(activities):
+        lines.append(f"activity {act}")
+    lines.append("")
+
+    for atom in atoms:
+        ttype = atom.atom_type
+        ops = atom.operands
+        cardinality = getattr(atom, 'cardinality', 1)
+
+        type_str = ttype
+        if ttype in _cardinality_types and isinstance(cardinality, int) and cardinality > 1:
+            type_str = f"{ttype}{cardinality}"
+
+        if len(ops) >= 2:
+            lines.append(f"{type_str}[{ops[0]}, {ops[1]}] | | |")
+        elif len(ops) == 1:
+            lines.append(f"{type_str}[{ops[0]}] | |")
+
+    return "\n".join(lines)
+
+
+def _compute_trace_features(log_df: pd.DataFrame, case_col: str = 'case:concept:name',
+                             activity_col: str = 'concept:name',
+                             timestamp_col: str = 'time:timestamp',
+                             resource_col: str = None) -> pd.DataFrame:
+    """
+    Compute per-trace features from an event-log DataFrame.
+    """
+    features = pd.DataFrame({'trace_id': log_df[case_col].unique()})
+    features = features.set_index('trace_id')
+
+    features['event_count'] = log_df.groupby(case_col)[activity_col].count()
+    features['rework_count'] = (
+        log_df.groupby(case_col)[activity_col]
+        .apply(lambda x: int((x.value_counts() - 1).clip(lower=0).sum()))
+    )
+
+    if timestamp_col in log_df.columns:
+        log_sorted = log_df.sort_values([case_col, timestamp_col]).copy()
+        log_sorted['_gap_s'] = (
+            log_sorted.groupby(case_col)[timestamp_col]
+            .diff()
+            .dt.total_seconds()
+        )
+        features['max_inter_event_gap_seconds'] = log_sorted.groupby(case_col)['_gap_s'].max()
+        features['avg_inter_event_gap_seconds'] = log_sorted.groupby(case_col)['_gap_s'].mean()
+    else:
+        features['max_inter_event_gap_seconds'] = float('nan')
+        features['avg_inter_event_gap_seconds'] = float('nan')
+
+    if resource_col and resource_col in log_df.columns:
+        features['unique_resource_count'] = log_df.groupby(case_col)[resource_col].nunique()
+    else:
+        for rc in ('org:resource', 'org:group', 'Resource'):
+            if rc in log_df.columns:
+                features['unique_resource_count'] = log_df.groupby(case_col)[rc].nunique()
+                break
+        else:
+            features['unique_resource_count'] = float('nan')
+
+    return features.reset_index().rename(columns={'trace_id': 'trace_id'})
+
+
+def _diagnose_declare_violations(declare_model, d4py_log, violations_df, case_ids_ordered):
+    """
+    For each binary constraint with violations, diagnose the root cause per violated trace.
+    Returns (diagnostics, trace_time_deltas).
+    """
+    from datetime import timedelta
+    from Declare4Py.ProcessModels.DeclareModel import DeclareModelConditionParserUtility
+
+    _glob = {'__builtins__': None}
+    parser = DeclareModelConditionParserUtility()
+
+    pm4py_log = d4py_log.get_log()
+    activity_key = d4py_log.activity_key or 'concept:name'
+
+    trace_map = {}
+    for trace in pm4py_log:
+        cid = trace.attributes.get('concept:name', '')
+        trace_map[str(cid)] = list(trace)
+
+    model_constraints = declare_model.get_decl_model_constraints()
+    constraint_dict_map = {}
+    for idx, col in enumerate(model_constraints):
+        if idx < len(declare_model.constraints):
+            constraint_dict_map[str(col)] = declare_model.constraints[idx]
+
+    index_vals = list(violations_df.index)
+    index_is_case_ids = all(str(v) in trace_map for v in index_vals[:5]) if index_vals else False
+
+    diagnostics = {}
+    trace_time_deltas = {}
+
+    for col in violations_df.columns:
+        col_str = str(col)
+        cdict = constraint_dict_map.get(col_str)
+        if cdict is None:
+            continue
+        template = cdict['template']
+        if not template.is_binary:
+            continue
+
+        activities = cdict['activities']
+        act_A, act_B = activities[0], activities[1]
+        conditions = cdict['condition']
+        act_cond_str  = conditions[0] if len(conditions) > 0 else ""
+        corr_cond_str = conditions[1] if len(conditions) > 1 else ""
+        time_cond_str = conditions[-1] if conditions else ""
+
+        try:
+            activation_rules = parser.parse_data_cond(act_cond_str)
+            correlation_rules = parser.parse_data_cond(corr_cond_str)
+            time_rule         = parser.parse_time_cond(time_cond_str)
+        except SyntaxError:
+            continue
+
+        no_target_count   = 0
+        corr_failed_count = 0
+        time_viol_count   = 0
+        time_viol_details = []
+        col_trace_deltas  = {}
+
+        def _record_time_viol(cid, delta_s):
+            nonlocal time_viol_count
+            time_viol_count += 1
+            if len(time_viol_details) < 50:
+                time_viol_details.append({'trace_id': cid, 'actual_seconds': delta_s})
+            if delta_s > col_trace_deltas.get(cid, 0):
+                col_trace_deltas[cid] = delta_s
+
+        tname = template.templ_str.replace(' ', '')
+
+        col_series = violations_df[col]
+        violated_indices = col_series[col_series > 0].index.tolist()
+
+        for idx_val in violated_indices:
+            if index_is_case_ids:
+                case_id = str(idx_val)
+            else:
+                pos = int(idx_val)
+                case_id = str(case_ids_ordered[pos]) if pos < len(case_ids_ordered) else None
+            if case_id is None:
+                continue
+            events = trace_map.get(case_id)
+            if not events:
+                continue
+
+            if tname in ('ChainResponse', 'AlternateResponse'):
+                for i, event in enumerate(events):
+                    if event[activity_key] != act_A:
+                        continue
+                    locl = {'A': event}
+                    try:
+                        if not eval(activation_rules, _glob, locl):
+                            continue
+                    except Exception:
+                        continue
+                    if i >= len(events) - 1:
+                        no_target_count += 1
+                        continue
+                    nxt = events[i + 1]
+                    if nxt[activity_key] != act_B:
+                        no_target_count += 1
+                        continue
+                    locl2 = {'A': event, 'T': nxt, 'timedelta': timedelta, 'abs': abs, 'float': float}
+                    try:
+                        corr_ok = eval(correlation_rules, _glob, locl2)
+                    except Exception:
+                        corr_ok = True
+                    if not corr_ok:
+                        corr_failed_count += 1
+                        continue
+                    try:
+                        time_ok = eval(time_rule, _glob, locl2)
+                    except Exception:
+                        time_ok = True
+                    if not time_ok:
+                        try:
+                            delta_s = abs((nxt['time:timestamp'] - event['time:timestamp']).total_seconds())
+                            _record_time_viol(case_id, delta_s)
+                        except Exception:
+                            _record_time_viol(case_id, 0.0)
+
+            elif tname in ('Response', 'RespondedExistence', 'AlternateResponse'):
+                pendings = []
+                for i, event in enumerate(events):
+                    if event[activity_key] == act_A:
+                        locl = {'A': event}
+                        try:
+                            if eval(activation_rules, _glob, locl):
+                                pendings.append((i, event))
+                        except Exception:
+                            pass
+                    if pendings and event[activity_key] == act_B:
+                        for pidx, (ai, aev) in reversed(list(enumerate(pendings))):
+                            locl2 = {'A': aev, 'T': event, 'timedelta': timedelta, 'abs': abs, 'float': float}
+                            try:
+                                corr_ok = eval(correlation_rules, _glob, locl2)
+                                time_ok = eval(time_rule, _glob, locl2)
+                            except Exception:
+                                corr_ok = time_ok = True
+                            if corr_ok and time_ok:
+                                pendings.pop(pidx)
+                                break
+                for ai, aev in pendings:
+                    future_Bs = [(j, events[j]) for j in range(ai + 1, len(events))
+                                 if events[j][activity_key] == act_B]
+                    if not future_Bs:
+                        no_target_count += 1
+                        continue
+                    any_corr = False
+                    for bj, bev in future_Bs:
+                        locl2 = {'A': aev, 'T': bev, 'timedelta': timedelta, 'abs': abs, 'float': float}
+                        try:
+                            corr_ok = eval(correlation_rules, _glob, locl2)
+                        except Exception:
+                            corr_ok = True
+                        if corr_ok:
+                            any_corr = True
+                    if not any_corr:
+                        corr_failed_count += 1
+                    else:
+                        for bj, bev in future_Bs:
+                            locl2 = {'A': aev, 'T': bev, 'timedelta': timedelta, 'abs': abs, 'float': float}
+                            try:
+                                if eval(correlation_rules, _glob, locl2):
+                                    delta_s = abs((bev['time:timestamp'] - aev['time:timestamp']).total_seconds())
+                                    _record_time_viol(case_id, delta_s)
+                                    break
+                            except Exception:
+                                pass
+
+            elif tname in ('ChainPrecedence', 'AlternatePrecedence'):
+                for i, event in enumerate(events):
+                    if event[activity_key] != act_B:
+                        continue
+                    locl = {'A': event}
+                    try:
+                        if not eval(activation_rules, _glob, locl):
+                            continue
+                    except Exception:
+                        continue
+                    if i == 0:
+                        no_target_count += 1
+                        continue
+                    prev = events[i - 1]
+                    if prev[activity_key] != act_A:
+                        no_target_count += 1
+                        continue
+                    locl2 = {'A': event, 'T': prev, 'timedelta': timedelta, 'abs': abs, 'float': float}
+                    try:
+                        corr_ok = eval(correlation_rules, _glob, locl2)
+                    except Exception:
+                        corr_ok = True
+                    if not corr_ok:
+                        corr_failed_count += 1
+                        continue
+                    try:
+                        time_ok = eval(time_rule, _glob, locl2)
+                    except Exception:
+                        time_ok = True
+                    if not time_ok:
+                        try:
+                            delta_s = abs((prev['time:timestamp'] - event['time:timestamp']).total_seconds())
+                            _record_time_viol(case_id, delta_s)
+                        except Exception:
+                            _record_time_viol(case_id, 0.0)
+
+            elif tname == 'Precedence':
+                for i, event in enumerate(events):
+                    if event[activity_key] != act_B:
+                        continue
+                    locl = {'A': event}
+                    try:
+                        if not eval(activation_rules, _glob, locl):
+                            continue
+                    except Exception:
+                        continue
+                    prior_As = [(j, events[j]) for j in range(i) if events[j][activity_key] == act_A]
+                    if not prior_As:
+                        no_target_count += 1
+                        continue
+                    any_corr = False
+                    for aj, aev in prior_As:
+                        locl2 = {'A': event, 'T': aev, 'timedelta': timedelta, 'abs': abs, 'float': float}
+                        try:
+                            corr_ok = eval(correlation_rules, _glob, locl2)
+                        except Exception:
+                            corr_ok = True
+                        if corr_ok:
+                            any_corr = True
+                    if not any_corr:
+                        corr_failed_count += 1
+                    else:
+                        for aj, aev in prior_As:
+                            locl2 = {'A': event, 'T': aev, 'timedelta': timedelta, 'abs': abs, 'float': float}
+                            try:
+                                if eval(correlation_rules, _glob, locl2):
+                                    delta_s = abs((aev['time:timestamp'] - event['time:timestamp']).total_seconds())
+                                    _record_time_viol(case_id, delta_s)
+                                    break
+                            except Exception:
+                                pass
+
+        diagnostics[col_str] = {
+            'no_target_count': no_target_count,
+            'target_condition_failed_count': corr_failed_count,
+            'time_window_violated_count': time_viol_count,
+            'time_violation_details': time_viol_details,
+        }
+        if col_trace_deltas:
+            trace_time_deltas[col_str] = col_trace_deltas
+
+    return diagnostics, trace_time_deltas
+
+
+@app.route('/upload-declarative-model', methods=['POST'])
+def upload_declarative_model():
+    import re
+    from Declare4Py.ProcessModels.DeclareModel import DeclareModel
+    from Declare4Py.D4PyEventLog import D4PyEventLog
+    from Declare4Py.ProcessMiningTasks.ConformanceChecking.MPDeclareAnalyzer import MPDeclareAnalyzer
+
+    print("\n==== UPLOAD DECLARATIVE MODEL CALLED ====")
+
+    xes_file = request.files.get('xes')
+    decl_file = request.files.get('decl')
+
+    if not xes_file or not xes_file.filename:
+        return jsonify({"error": "Missing event log file"}), 400
+    if not decl_file or not decl_file.filename:
+        return jsonify({"error": "Missing .decl model file"}), 400
+
+    upload_folder = "uploads"
+    os.makedirs(upload_folder, exist_ok=True)
+
+    xes_path = os.path.join(upload_folder, xes_file.filename)
+    decl_path = os.path.join(upload_folder, decl_file.filename)
+
+    xes_file.save(xes_path)
+    decl_file.save(decl_path)
+
+    last_uploaded_data['xes_path'] = xes_path
+    last_uploaded_data['decl_path'] = decl_path
+    last_uploaded_data['bpmn_path'] = None
+    last_uploaded_data['bpmn_model'] = None
+    last_uploaded_data['alignments'] = None
+    last_uploaded_data['deviation_matrix'] = None
+    last_uploaded_data['impact_matrix'] = None
+    last_uploaded_data['atoms'] = None
+    last_uploaded_data['atoms_df'] = None
+    last_uploaded_data['event_log_pa'] = None
+    last_uploaded_data['decl_constraint_info'] = None
+
+    _, ext = os.path.splitext(xes_path)
+    if xes_path.endswith('.xes.gz') or ext == '.xes':
+        xes_log = xes_importer.apply(xes_path)
+    elif ext == '.csv':
+        log_csv = pd.read_csv(xes_path, encoding='utf-8-sig')
+        log_csv['time:timestamp'] = pd.to_datetime(log_csv['time:timestamp'], utc=True)
+        xes_log = log_converter.apply(log_csv)
+    else:
+        return jsonify({"error": "Unsupported log format"}), 400
+
+    xes_errors = validate_xes_log(xes_log)
+    if xes_errors:
+        return jsonify({"error": "Invalid XES log:\n" + "\n".join(xes_errors)}), 400
+
+    last_uploaded_data['xes_log'] = xes_log
+    log_df = pm4py.convert_to_dataframe(xes_log)
+
+    case_col = 'case:concept:name'
+    activity_col = 'concept:name'
+    timestamp_col = 'time:timestamp'
+
+    case_ids_ordered = list(dict.fromkeys(log_df[case_col].tolist()))
+
+    d4py_log = D4PyEventLog(case_name=case_col)
+    d4py_log.parse_xes_log(xes_path)
+
+    declare_model = DeclareModel().parse_from_file(decl_path)
+    model_constraints = declare_model.get_decl_model_constraints()
+
+    basic_checker = MPDeclareAnalyzer(log=d4py_log, declare_model=declare_model, consider_vacuity=False)
+    conf_check_res = basic_checker.run()
+
+    violations_df = conf_check_res.get_metric(metric="num_violations")
+    constraint_cols = list(violations_df.columns)
+
+    try:
+        activations_df = conf_check_res.get_metric(metric="num_activations")
+        activations_per_constraint = activations_df.fillna(0).sum(axis=0).to_dict()
+    except Exception:
+        activations_per_constraint = {}
+
+    violations_binary = (violations_df > 0).astype(int)
+
+    if set(violations_df.index).issubset(set(case_ids_ordered)):
+        violations_binary = violations_binary.reindex(case_ids_ordered).fillna(0).astype(int)
+        violations_binary.index = case_ids_ordered
+    else:
+        n = min(len(violations_binary), len(case_ids_ordered))
+        violations_binary = violations_binary.iloc[:n].copy()
+        violations_binary.index = case_ids_ordered[:n]
+        if n < len(case_ids_ordered):
+            pad = pd.DataFrame(0, index=case_ids_ordered[n:], columns=constraint_cols)
+            violations_binary = pd.concat([violations_binary, pad])
+
+    violations_binary.index.name = 'trace_id'
+    collect_data = violations_binary.reset_index()
+
+    if timestamp_col in log_df.columns:
+        log_df[timestamp_col] = pd.to_datetime(log_df[timestamp_col])
+        durations = log_df.groupby(case_col)[timestamp_col].agg(['min', 'max'])
+        durations['duration'] = (durations['max'] - durations['min']).dt.total_seconds()
+        duration_map = durations['duration'].to_dict()
+        collect_data['trace_duration_seconds'] = collect_data['trace_id'].map(duration_map).fillna(0)
+    else:
+        collect_data['trace_duration_seconds'] = 0.0
+
+    if timestamp_col in log_df.columns:
+        activities_per_case = (
+            log_df.sort_values(timestamp_col)
+            .groupby(case_col)[activity_col]
+            .apply(list)
+            .to_dict()
+        )
+    else:
+        activities_per_case = log_df.groupby(case_col)[activity_col].apply(list).to_dict()
+    collect_data['activities'] = collect_data['trace_id'].map(activities_per_case)
+
+    ordered_cols = ['trace_id', 'trace_duration_seconds', 'activities'] + constraint_cols
+    collect_data = collect_data[[c for c in ordered_cols if c in collect_data.columns]]
+
+    try:
+        trace_features = _compute_trace_features(log_df, case_col=case_col, activity_col=activity_col,
+                                                  timestamp_col=timestamp_col)
+        collect_data = collect_data.merge(
+            trace_features,
+            left_on='trace_id', right_on='trace_id', how='left'
+        )
+    except Exception as feat_err:
+        print(f"[WARN] Could not compute trace features: {feat_err}")
+
+    last_uploaded_data['deviation_matrix'] = collect_data
+    last_uploaded_data['original_deviation_matrix'] = collect_data.copy()
+    last_uploaded_data['mode'] = 'declarative-model'
+    last_uploaded_data['excluded_case_ids'] = []
+    last_uploaded_data['excluded_by_step'] = {}
+    last_uploaded_data['is_filtered'] = False
+
+    print("Running per-violation diagnostics...")
+    try:
+        violation_diagnostics, trace_time_deltas = _diagnose_declare_violations(
+            declare_model, d4py_log, violations_df, case_ids_ordered
+        )
+    except Exception as diag_err:
+        print(f"[WARN] Violation diagnostics failed: {diag_err}")
+        import traceback as tb
+        tb.print_exc()
+        violation_diagnostics, trace_time_deltas = {}, {}
+    last_uploaded_data['violation_diagnostics'] = violation_diagnostics
+    last_uploaded_data['trace_time_deltas'] = trace_time_deltas
+    print(f"Diagnostics done for {len(violation_diagnostics)} constraints.")
+
+    decl_constraint_info = []
+    for col in constraint_cols:
+        m = re.match(r'^([^\[]+)\[([^\]]*)\]', str(col).strip())
+        if m:
+            ctype = m.group(1).strip()
+            ops = [op.strip() for op in m.group(2).split(',') if op.strip()]
+        else:
+            ctype = str(col)
+            ops = []
+
+        col_parts = str(col).split(' |')
+        raw_conds = [p.strip() for p in col_parts[1:]]
+
+        is_binary = len(ops) == 2
+
+        if is_binary:
+            activation_cond  = raw_conds[0] if len(raw_conds) > 0 else ""
+            correlation_cond = raw_conds[1] if len(raw_conds) > 1 else ""
+            time_cond        = raw_conds[2] if len(raw_conds) > 2 else ""
+        else:
+            activation_cond  = raw_conds[0] if len(raw_conds) > 0 else ""
+            correlation_cond = ""
+            time_cond        = raw_conds[1] if len(raw_conds) > 1 else ""
+
+        _time_pat = re.compile(r'^[\d.]+,[\d.]+(,\s*(s|m|h|d))?$', re.IGNORECASE)
+        if correlation_cond and _time_pat.match(correlation_cond):
+            time_cond = correlation_cond
+            correlation_cond = ""
+
+        total_activations = int(activations_per_constraint.get(col, 0))
+
+        parsed_time = None
+        if time_cond:
+            time_parts = time_cond.split(',')
+            if len(time_parts) == 3:
+                try:
+                    parsed_time = {
+                        'min': float(time_parts[0]),
+                        'max': float(time_parts[1]),
+                        'unit': time_parts[2].strip(),
+                        'raw': time_cond,
+                    }
+                except ValueError:
+                    parsed_time = {'raw': time_cond}
+
+        diag = violation_diagnostics.get(str(col), {})
+        decl_constraint_info.append({
+            'col_name': col,
+            'type': ctype,
+            'operands': ops,
+            'activation_condition': activation_cond if activation_cond else None,
+            'correlation_condition': correlation_cond if correlation_cond else None,
+            'time_condition': parsed_time,
+            'is_data_aware': bool(activation_cond or correlation_cond),
+            'has_time_constraint': parsed_time is not None,
+            'total_activations': total_activations,
+            'violation_diagnostics': diag,
+        })
+    last_uploaded_data['decl_constraint_info'] = decl_constraint_info
+
+    print(f"Uploaded .decl model: {len(model_constraints)} constraints, {len(case_ids_ordered)} traces, matrix shape: {collect_data.shape}")
+
+    return jsonify({
+        "message": "Declarative model conformance check completed",
+        "constraint_count": len(model_constraints),
+        "trace_count": len(case_ids_ordered),
+    })
+
+
+@app.route('/api/time-constraint-columns', methods=['GET'])
+def time_constraint_columns():
+    """Return constraint columns with a time window."""
+    decl_info = last_uploaded_data.get('decl_constraint_info', [])
+    result = []
+    for info in decl_info:
+        if info.get('has_time_constraint'):
+            tc = info.get('time_condition', {}) or {}
+            result.append({
+                'col_name': info['col_name'],
+                'label': f"{info['type']}[{', '.join(info['operands'])}]",
+                'time_condition': tc,
+            })
+    return jsonify({'constraints': result})
+
+
+@app.route('/api/download-mined-decl', methods=['GET'])
+def download_mined_decl():
+    """Download the .decl file saved from the last declarative mining run."""
+    path = last_uploaded_data.get('mined_decl_path')
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "No mined .decl file available. Run declarative mining first."}), 404
+    directory = os.path.dirname(path)
+    filename = os.path.basename(path)
+    return send_from_directory(directory, filename, as_attachment=True)
+
+
 @app.route("/api/preview-matrix", methods=["GET"])
 def api_preview_matrix():
 
@@ -498,6 +1262,30 @@ def api_preview_matrix():
 @app.route('/api/deviation-overview', methods=['GET'])
 def deviation_overview():
     mode = last_uploaded_data.get('mode', 'bpmn')
+
+    if mode == 'declarative-model':
+        decl_constraint_info = last_uploaded_data.get('decl_constraint_info', [])
+        if not decl_constraint_info:
+            return jsonify({"error": "No .decl model loaded yet"}), 400
+        df = last_uploaded_data.get('deviation_matrix')
+        constraints = []
+        for info in decl_constraint_info:
+            col_name = info['col_name']
+            violation_count = int(df[col_name].sum()) if df is not None and col_name in df.columns else 0
+            constraints.append({
+                "constraint": col_name,
+                "type": info['type'],
+                "operands": info['operands'],
+                "violation_count": violation_count,
+                "activation_condition": info.get('activation_condition'),
+                "correlation_condition": info.get('correlation_condition'),
+                "time_condition": info.get('time_condition'),
+                "is_data_aware": info.get('is_data_aware', False),
+                "has_time_constraint": info.get('has_time_constraint', False),
+                "total_activations": info.get('total_activations', 0),
+                "violation_diagnostics": info.get('violation_diagnostics', {}),
+            })
+        return jsonify({"constraints": constraints})
 
     if mode == 'declarative':
         atoms_df = last_uploaded_data.get('atoms_df')
@@ -999,6 +1787,23 @@ def preload_file(filename):
 def api_model_content():
     """Return the uploaded model content. For BPMN: raw XML. For PNML: SVG. For declarative: constraint list."""
     mode = last_uploaded_data.get('mode', 'bpmn')
+
+    if mode == 'declarative-model':
+        decl_constraint_info = last_uploaded_data.get('decl_constraint_info', [])
+        if not decl_constraint_info:
+            return jsonify({"error": "No .decl model loaded yet"}), 400
+        constraints = []
+        for info in decl_constraint_info:
+            constraints.append({
+                "type": info['type'],
+                "op_0": info['operands'][0] if len(info['operands']) > 0 else '',
+                "op_1": info['operands'][1] if len(info['operands']) > 1 else '',
+                "activation_condition": info.get('activation_condition'),
+                "correlation_condition": info.get('correlation_condition'),
+                "time_condition": info.get('time_condition'),
+                "total_activations": info.get('total_activations', 0),
+            })
+        return jsonify({"type": "declarative-model", "constraints": constraints})
 
     if mode == 'declarative':
         atoms_df = last_uploaded_data.get('atoms_df')

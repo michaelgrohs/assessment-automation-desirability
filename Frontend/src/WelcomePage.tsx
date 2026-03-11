@@ -26,9 +26,18 @@ const API_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
 
 const WelcomePage: React.FC = () => {
   const [mode, setMode] = useState<ConformanceMode>('bpmn');
-  const [bpmnFile, setBpmnFile] = useState<File | null>(null);
-  const [xesFile, setXesFile] = useState<File | null>(null);
+  const [declSubMode, setDeclSubMode] = useState<'mine' | 'upload'>('mine');
+  const [bpmnSubMode, setBpmnSubMode] = useState<'upload' | 'mine'>('upload');
+  const [miningAlgorithm, setMiningAlgorithm] = useState<'inductive_infrequent' | 'heuristics' | 'alpha'>('inductive_infrequent');
+  const [noiseThreshold, setNoiseThreshold] = useState<number>(0.2);
+  const [bpmnFile, setBpmnFile] = useState<Blob | null>(null);
+  const [bpmnFileName, setBpmnFileName] = useState<string>('');
+  const [xesFile, setXesFile] = useState<Blob | null>(null);
+  const [xesFileName, setXesFileName] = useState<string>('');
+  const [declFile, setDeclFile] = useState<Blob | null>(null);
+  const [declFileName, setDeclFileName] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [miningPhase, setMiningPhase] = useState<'mining' | 'computing' | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -36,6 +45,7 @@ const WelcomePage: React.FC = () => {
   const [availableTemplates, setAvailableTemplates] = useState<string[]>([]);
   const [selectedTemplates, setSelectedTemplates] = useState<string[]>([]);
   const [minSupport, setMinSupport] = useState<number>(0.1);
+  const [minedDeclFilename, setMinedDeclFilename] = useState<string | null>(null);
 
   const navigate = useNavigate();
   const { setContinue, setHideBack } = useBottomNav();
@@ -55,30 +65,64 @@ const WelcomePage: React.FC = () => {
     return () => setContinue(null);
   }, [isReady, navigate, setContinue]);
 
-  // Fetch available templates on mount
+  const [backendReady, setBackendReady] = useState(false);
+
+  // Poll until backend is reachable, then fetch templates
   useEffect(() => {
-    fetch(`${API_URL}/api/available-templates`)
-      .then(res => res.json())
-      .then(data => {
-        setAvailableTemplates(data.templates || []);
-        setSelectedTemplates(data.templates || []);
-      })
-      .catch(err => console.error("Failed to fetch templates:", err));
+    let cancelled = false;
+    const tryFetch = async () => {
+      while (!cancelled) {
+        try {
+          const res = await fetch(`${API_URL}/api/available-templates`);
+          const data = await res.json();
+          if (!cancelled) {
+            setAvailableTemplates(data.templates || []);
+            setSelectedTemplates(data.templates || []);
+            setBackendReady(true);
+          }
+          return;
+        } catch {
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+    };
+    tryFetch();
+    return () => { cancelled = true; };
   }, []);
 
   const handleFileChange = (
       event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
-      setFile: React.Dispatch<React.SetStateAction<File | null>>
+      setBlob: React.Dispatch<React.SetStateAction<Blob | null>>,
+      setName: React.Dispatch<React.SetStateAction<string>>,
     ) => {
       const target = event.target as HTMLInputElement;
       if (target.files && target.files[0]) {
-        setFile(target.files[0]);
+        const file = target.files[0];
+        setName(file.name);
+        // Read into memory immediately so Chrome can't detect on-disk changes later
+        file.arrayBuffer().then(buf => setBlob(new Blob([buf], { type: file.type })));
       }
     };
 
   const handleModeChange = (_: React.MouseEvent<HTMLElement>, newMode: ConformanceMode | null) => {
     if (newMode) {
       setMode(newMode);
+      setIsReady(false);
+      setErrorMsg(null);
+    }
+  };
+
+  const handleDeclSubModeChange = (_: React.MouseEvent<HTMLElement>, newSub: 'mine' | 'upload' | null) => {
+    if (newSub) {
+      setDeclSubMode(newSub);
+      setIsReady(false);
+      setErrorMsg(null);
+    }
+  };
+
+  const handleBpmnSubModeChange = (_: React.MouseEvent<HTMLElement>, newSub: 'upload' | 'mine' | null) => {
+    if (newSub) {
+      setBpmnSubMode(newSub);
       setIsReady(false);
       setErrorMsg(null);
     }
@@ -103,8 +147,12 @@ const WelcomePage: React.FC = () => {
   };
 
   const handleUpload = async () => {
-    if (mode === 'bpmn') {
+    if (mode === 'bpmn' && bpmnSubMode === 'upload') {
       if (!bpmnFile || !xesFile) return;
+    } else if (mode === 'bpmn' && bpmnSubMode === 'mine') {
+      if (!xesFile) return;
+    } else if (mode === 'declarative' && declSubMode === 'upload') {
+      if (!xesFile || !declFile) return;
     } else {
       if (!xesFile) return;
     }
@@ -113,6 +161,7 @@ const WelcomePage: React.FC = () => {
     setIsProcessing(true);
     setIsReady(false);
     setErrorMsg(null);
+    let keepSpinner = false;
 
     // Reset backend cache before uploading
     try {
@@ -122,10 +171,10 @@ const WelcomePage: React.FC = () => {
     }
 
     try {
-      if (mode === 'bpmn') {
+      if (mode === 'bpmn' && bpmnSubMode === 'upload') {
         const formData = new FormData();
-        formData.append('bpmn', bpmnFile!);
-        formData.append('xes', xesFile!);
+        formData.append('bpmn', bpmnFile!, bpmnFileName);
+        formData.append('xes', xesFile!, xesFileName);
 
         const response = await fetch(`${API_URL}/upload`, {
           method: "POST",
@@ -144,10 +193,83 @@ const WelcomePage: React.FC = () => {
           if (data.traceback) console.error("Backend traceback:\n", data.traceback);
           setErrorMsg(msg);
         }
-      } else {
-        // Declarative mode
+      } else if (mode === 'bpmn' && bpmnSubMode === 'mine') {
         const formData = new FormData();
-        formData.append('xes', xesFile!);
+        formData.append('xes', xesFile!, xesFileName);
+        formData.append('algorithm', miningAlgorithm);
+        formData.append('noise_threshold', String(noiseThreshold));
+
+        const response = await fetch(`${API_URL}/upload-mine-model`, {
+          method: "POST",
+          body: formData,
+        });
+
+        const data = await response.json();
+        console.log("Mine-model response:", data);
+
+        if (response.ok) {
+          setConformanceMode('bpmn');
+          // Mining + alignments run fully in the background. Poll until ready.
+          setMiningPhase('mining');
+          const pollInterval = setInterval(async () => {
+            try {
+              const statusRes = await fetch(`${API_URL}/api/alignment-status`);
+              const { status, error } = await statusRes.json();
+              if (status === 'ready') {
+                clearInterval(pollInterval);
+                setMiningPhase(null);
+                setIsReady(true);
+                setIsProcessing(false);
+              } else if (status === 'error') {
+                clearInterval(pollInterval);
+                setMiningPhase(null);
+                setErrorMsg(error || 'Process mining failed');
+                setIsProcessing(false);
+              } else if (status === 'computing') {
+                setMiningPhase('computing');
+              } else {
+                setMiningPhase('mining');
+              }
+            } catch (e) {
+              console.warn("Polling error:", e);
+            }
+          }, 2000);
+          // Spinner stays alive; finally block must not clear it
+          keepSpinner = true;
+          return;
+        } else {
+          const msg = data.error || "Model mining failed";
+          console.error("Mining failed:", msg);
+          if (data.traceback) console.error("Backend traceback:\n", data.traceback);
+          setErrorMsg(msg);
+        }
+      } else if (mode === 'declarative' && declSubMode === 'upload') {
+        // Declarative model upload mode
+        const formData = new FormData();
+        formData.append('xes', xesFile!, xesFileName);
+        formData.append('decl', declFile!, declFileName);
+
+        const response = await fetch(`${API_URL}/upload-declarative-model`, {
+          method: "POST",
+          body: formData,
+        });
+
+        const data = await response.json();
+        console.log("Declarative model upload response:", data);
+
+        if (response.ok) {
+          setConformanceMode('declarative-model');
+          setIsReady(true);
+        } else {
+          const msg = data.error || "Upload failed";
+          console.error("Upload failed:", msg);
+          if (data.traceback) console.error("Backend traceback:\n", data.traceback);
+          setErrorMsg(msg);
+        }
+      } else {
+        // Declarative mine-from-log mode
+        const formData = new FormData();
+        formData.append('xes', xesFile!, xesFileName);
         formData.append('templates', JSON.stringify(selectedTemplates));
         formData.append('min_support', String(minSupport));
 
@@ -161,6 +283,7 @@ const WelcomePage: React.FC = () => {
 
         if (response.ok) {
           setConformanceMode('declarative');
+          if (data.decl_filename) setMinedDeclFilename(data.decl_filename);
           setIsReady(true);
         } else {
           const msg = data.error || "Upload failed";
@@ -173,13 +296,26 @@ const WelcomePage: React.FC = () => {
       console.error("Upload error:", error);
       setErrorMsg(String(error));
     } finally {
-      setIsProcessing(false);
+      if (!keepSpinner) setIsProcessing(false);
     }
   };
 
-  const canUpload = mode === 'bpmn'
+  const canUpload = mode === 'bpmn' && bpmnSubMode === 'upload'
     ? (!!bpmnFile && !!xesFile && !isProcessing)
-    : (!!xesFile && selectedTemplates.length > 0 && !isProcessing);
+    : mode === 'bpmn' && bpmnSubMode === 'mine'
+      ? (!!xesFile && !isProcessing)
+      : mode === 'declarative' && declSubMode === 'upload'
+        ? (!!xesFile && !!declFile && !isProcessing)
+        : (!!xesFile && selectedTemplates.length > 0 && !isProcessing);
+
+  if (!backendReady) {
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh', gap: 2 }}>
+        <CircularProgress />
+        <Typography color="text.secondary">Connecting to backend...</Typography>
+      </Box>
+    );
+  }
 
   return (
     <Box sx={{ maxWidth: 800, margin: '0 auto', textAlign: 'center', p: 4 }}>
@@ -188,10 +324,11 @@ const WelcomePage: React.FC = () => {
           Conformance Analysis
         </Typography>
         <Tooltip
-          title="Upload your event log and (optionally) process model to begin conformance analysis.
-          You have two options to continue:
-          1. Trace Alignment mode: Upload a process model and an event log. Deviations are idenfieid by aligning each trace to the process model — deviations appear as skipped activities (expected by the model but absent in the log) or inserted activities (present in the log but not the model).
-          2. Declarative Conformance Checking mode: Upload an event log only. A declarative model, i.e., behavioral constraints, are automatically mined from the log using DECLARE templates; select which constraint types to consider and a minimum support threshold. Deviations are violations of the mined constraints."
+          title="Upload your event log and process model to begin conformance analysis. You have four options:
+1. Trace Alignment — Upload Model: Upload a BPMN/PNML process model and an event log. Deviations are identified by aligning each trace to the model.
+2. Trace Alignment — Mine Model: Upload an event log only. A process model is automatically discovered (IMf, Heuristics, or Alpha Miner) and used for trace alignment.
+3. Declarative — Mine from Log: Upload an event log only. A declarative model is mined using DECLARE templates; select constraint types and a minimum support threshold.
+4. Declarative — Upload Model: Upload an event log and a .decl model file. Conformance is checked against the uploaded model."
           arrow
           placement="right"
         >
@@ -214,32 +351,143 @@ const WelcomePage: React.FC = () => {
           <ToggleButton value="declarative">Declarative Conformance Checking</ToggleButton>
         </ToggleButtonGroup>
 
-        {/* BPMN mode: process model upload */}
+        {/* Declarative sub-mode selection */}
+        {mode === 'declarative' && (
+          <Paper sx={{ p: 2, backgroundColor: '#f9f9f9' }}>
+            <Typography variant="subtitle2" gutterBottom color="text.secondary">
+              Choose declarative approach:
+            </Typography>
+            <ToggleButtonGroup
+              value={declSubMode}
+              exclusive
+              onChange={handleDeclSubModeChange}
+              fullWidth
+              size="small"
+            >
+              <ToggleButton value="mine">
+                Mine Model from Log
+              </ToggleButton>
+              <ToggleButton value="upload">
+                Upload .decl Model
+              </ToggleButton>
+            </ToggleButtonGroup>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+              {declSubMode === 'mine'
+                ? "A declarative model will be automatically mined from your event log using DECLARE templates."
+                : "Upload a pre-existing .decl model and check your event log for conformance against it."}
+            </Typography>
+          </Paper>
+        )}
+
+        {/* Trace Alignment sub-mode selection */}
         {mode === 'bpmn' && (
+          <Paper sx={{ p: 2, backgroundColor: '#f9f9f9' }}>
+            <Typography variant="subtitle2" gutterBottom color="text.secondary">
+              Process model source:
+            </Typography>
+            <ToggleButtonGroup
+              value={bpmnSubMode}
+              exclusive
+              onChange={handleBpmnSubModeChange}
+              fullWidth
+              size="small"
+            >
+              <ToggleButton value="upload">Upload Process Model</ToggleButton>
+              <ToggleButton value="mine">Mine Model from Log</ToggleButton>
+            </ToggleButtonGroup>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+              {bpmnSubMode === 'upload'
+                ? "Upload a BPMN or PNML process model and an event log. Deviations are computed via trace alignment."
+                : "A process model is automatically discovered from your event log using the selected algorithm, then used for trace alignment."}
+            </Typography>
+          </Paper>
+        )}
+
+        {/* BPMN upload sub-mode: model file */}
+        {mode === 'bpmn' && bpmnSubMode === 'upload' && (
           <Paper sx={{ p: 3 }}>
             <Typography variant="h6">Upload Process Model</Typography>
             <TextField
               type="file"
               inputProps={{ accept: '.bpmn,.pnml' }}
-              onChange={(e) => handleFileChange(e, setBpmnFile)}
+              onChange={(e) => handleFileChange(e, setBpmnFile, setBpmnFileName)}
               fullWidth
             />
           </Paper>
         )}
 
-        {/* Event log upload (both modes) */}
+        {/* BPMN mine sub-mode: algorithm selection */}
+        {mode === 'bpmn' && bpmnSubMode === 'mine' && (
+          <Paper sx={{ p: 3, textAlign: 'left' }}>
+            <Typography variant="h6" gutterBottom>Discovery Algorithm</Typography>
+            <ToggleButtonGroup
+              value={miningAlgorithm}
+              exclusive
+              onChange={(_, v) => v && setMiningAlgorithm(v)}
+              fullWidth
+              size="small"
+              sx={{ flexWrap: 'wrap' }}
+            >
+              <ToggleButton value="inductive_infrequent">Inductive Miner Infrequent</ToggleButton>
+              <ToggleButton value="heuristics">Heuristics Miner</ToggleButton>
+              <ToggleButton value="alpha">Alpha Miner</ToggleButton>
+            </ToggleButtonGroup>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+              {miningAlgorithm === 'inductive_infrequent' && "Inductive Miner Infrequent (IMf): filters infrequent behaviour below the noise threshold before discovery. Guarantees a sound, block-structured model."}
+              {miningAlgorithm === 'heuristics' && "Heuristics Miner: dependency-graph-based discovery; more robust to noise. Does not guarantee soundness."}
+              {miningAlgorithm === 'alpha' && "Alpha Miner: classic algorithm based on ordering relations. Sensitive to noise; does not handle loops or short-loops well."}
+            </Typography>
+            {(miningAlgorithm === 'inductive_infrequent') && (
+              <Box sx={{ mt: 2 }}>
+                <Typography variant="body2" gutterBottom>
+                  Noise threshold: <strong>{noiseThreshold.toFixed(2)}</strong>
+                  <Tooltip title="Fraction of traces that can be filtered as infrequent behaviour. Higher = more filtering, simpler model." arrow>
+                    <IconButton size="small" sx={{ ml: 0.5 }}><InfoIcon sx={{ fontSize: 14 }} /></IconButton>
+                  </Tooltip>
+                </Typography>
+                <Slider
+                  value={noiseThreshold}
+                  onChange={(_, v) => setNoiseThreshold(v as number)}
+                  min={0.0}
+                  max={0.5}
+                  step={0.05}
+                  valueLabelDisplay="auto"
+                  marks
+                />
+              </Box>
+            )}
+          </Paper>
+        )}
+
+        {/* Event log upload (all modes) */}
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6">Upload Event Log</Typography>
           <TextField
             type="file"
-            inputProps={{ accept: '.xes,.csv' }}
-            onChange={(e) => handleFileChange(e, setXesFile)}
+            inputProps={{ accept: '.xes,.csv,.xes.gz' }}
+            onChange={(e) => handleFileChange(e, setXesFile, setXesFileName)}
             fullWidth
           />
         </Paper>
 
-        {/* Declarative mode: template selection + min_support */}
-        {mode === 'declarative' && (
+        {/* Declarative upload mode: .decl model file */}
+        {mode === 'declarative' && declSubMode === 'upload' && (
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h6">Upload Declarative Model</Typography>
+            <Typography variant="body2" color="text.secondary" gutterBottom>
+              Upload a .decl file containing DECLARE constraints.
+            </Typography>
+            <TextField
+              type="file"
+              inputProps={{ accept: '.decl' }}
+              onChange={(e) => handleFileChange(e, setDeclFile, setDeclFileName)}
+              fullWidth
+            />
+          </Paper>
+        )}
+
+        {/* Declarative mine mode: template selection + min_support */}
+        {mode === 'declarative' && declSubMode === 'mine' && (
           <>
             <Paper sx={{ p: 3, textAlign: 'left' }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
@@ -289,6 +537,20 @@ const WelcomePage: React.FC = () => {
           <Typography color="error" variant="body2">{errorMsg}</Typography>
         )}
 
+        {isReady && minedDeclFilename && (
+          <Box sx={{ mt: 1, mb: 1 }}>
+            <Button
+              variant="outlined"
+              size="small"
+              component="a"
+              href={`${API_URL}/api/download-mined-decl`}
+              download={minedDeclFilename}
+            >
+              Download mined model as .decl
+            </Button>
+          </Box>
+        )}
+
         {!isReady && (
           <Box>
             <Button
@@ -298,7 +560,13 @@ const WelcomePage: React.FC = () => {
               startIcon={isProcessing ? <CircularProgress size={20} /> : <UploadFileIcon />}
             >
               {isProcessing
-                ? (mode === 'bpmn' ? "Computing Alignments..." : "Mining Constraints...")
+                ? (mode === 'bpmn' && bpmnSubMode === 'mine'
+                    ? (miningPhase === 'computing' ? "Computing Alignments..." : "Mining Model...")
+                    : mode === 'bpmn'
+                      ? "Computing Alignments..."
+                      : declSubMode === 'upload'
+                        ? "Checking Conformance..."
+                        : "Mining Constraints...")
                 : "Upload & Compute"
               }
             </Button>
