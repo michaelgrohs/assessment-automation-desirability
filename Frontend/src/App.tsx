@@ -10,8 +10,11 @@ import LogQualityCheck from "./LogQualityCheck";
 import LogDeviations from "./LogDeviations";
 import ModelCheck from "./ModelCheck";
 import DeviationSelection from "./DeviationSelection";
+import IssueGrouping from "./IssueGrouping";
+import WorkaroundAnalysis from "./WorkaroundAnalysis";
 import CausalResults from "./CausalResults";
 import CriticalityResults from "./CriticalityResults";
+import Recommendations from "./Recommendations";
 import ViolationGuidelines from "./ViolationGuidelines";
 import ActivityStats from "./ActivityStats";
 
@@ -30,10 +33,13 @@ const App: React.FC = () => {
             <Route path="/log-deviations" element={<LogDeviations />} />
             <Route path="/model-check" element={<ModelCheck />} />
             <Route path="/deviation-selection" element={<DeviationSelection />} />
+            <Route path="/issue-grouping" element={<IssueGrouping />} />
+            <Route path="/workaround-analysis" element={<WorkaroundAnalysis />} />
             <Route path="/violation-guidelines" element={<ViolationGuidelines />} />
             <Route path="/select-dimensions" element={<SelectDimensions />} />
             <Route path="/causal-results" element={<CausalResults />} />
             <Route path="/criticality-results" element={<CriticalityResults />} />
+            <Route path="/recommendations" element={<Recommendations />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

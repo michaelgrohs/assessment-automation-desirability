@@ -10,7 +10,7 @@ import { useFileContext } from "./FileContext";
 import StepProgressBar from "./StepProgressBar";
 import FilterBanner from "./FilterBanner";
 
-const API_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
+const API_URL = process.env.REACT_APP_API_URL || "http://localhost:1965";
 
 const LayoutInner: React.FC = () => {
   const navigate = useNavigate();

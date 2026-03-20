@@ -34,7 +34,7 @@ import {
   ZAxis,
 } from "recharts";
 
-const API_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
+const API_URL = process.env.REACT_APP_API_URL || "http://localhost:1965";
 
 interface CausalResult {
   deviation: string;
@@ -119,11 +119,6 @@ const CriticalityResults: React.FC = () => {
   const navigate = useNavigate();
   const { setContinue } = useBottomNav();
 
-  React.useEffect(() => {
-    setContinue({ label: "Back to Start", onClick: () => navigate("/") });
-    return () => setContinue(null);
-  }, [navigate, setContinue]);
-
   const results: CausalResult[] = location.state?.results || [];
   const criticalityMap: CriticalityMap = location.state?.criticalityMap || {};
 
@@ -151,6 +146,14 @@ const CriticalityResults: React.FC = () => {
     .sort((a, b) => b.score - a.score);
 
   const [priorityList, setPriorityList] = React.useState(deviationPriorities);
+
+  React.useEffect(() => {
+    setContinue({
+      label: "Continue to Recommendations",
+      onClick: () => navigate("/recommendations", { state: { results, criticalityMap, priorityList } }),
+    });
+    return () => setContinue(null);
+  }, [navigate, setContinue, results, criticalityMap, priorityList]);
 
   // Root cause analysis state
   const [selectedCell, setSelectedCell] = React.useState<{ dimension: string; deviation: string } | null>(null);
@@ -223,7 +226,7 @@ const CriticalityResults: React.FC = () => {
         dim,
         ...deviations.map((dev) => {
           const result = results.find((r) => r.dimension === dim && r.deviation === dev);
-          if (!result) return "";
+          if (!result || result.ate == null) return "";
           const label = getCriticality(result.ate, criticalityMap[dim]);
           return `${label ?? "-"} (${result.ate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`;
         }),
@@ -699,7 +702,7 @@ const CriticalityResults: React.FC = () => {
 
               {deviations.map((dev) => {
                 const result = results.find((r) => r.dimension === dim && r.deviation === dev);
-                if (!result) return <TableCell key={dev} />;
+                if (!result || result.ate == null) return <TableCell key={dev} />;
 
                 const label = getCriticality(result.ate, criticalityMap[dim]);
 

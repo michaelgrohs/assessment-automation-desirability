@@ -28,13 +28,23 @@ import InfoIcon from '@mui/icons-material/Info';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import ReplayIcon from '@mui/icons-material/Replay';
 import { useNavigate } from 'react-router-dom';
 import NavigatedViewer from 'bpmn-js/lib/NavigatedViewer';
 import { useBottomNav } from './BottomNavContext';
 import { useFileContext } from './FileContext';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5000';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:1965';
 const WARN_THRESHOLD = 0.7;
+
+const UNIT_LABELS: Record<string, string> = { s: 'seconds', m: 'minutes', h: 'hours', d: 'days' };
+const formatTimeCondition = (tc: { min: number; max: number; unit: string }): string => {
+  const unit = UNIT_LABELS[tc.unit] ?? tc.unit;
+  const fmt = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (tc.min === tc.max) return `exactly ${fmt(tc.min)} ${unit}`;
+  if (tc.min === 0) return `within ${fmt(tc.max)} ${unit}`;
+  return `${fmt(tc.min)} – ${fmt(tc.max)} ${unit}`;
+};
 
 interface BpmnModelCheckData {
   mode: 'bpmn';
@@ -57,7 +67,7 @@ interface DeclarativeModelCheckData {
 type ModelCheckData = BpmnModelCheckData | DeclarativeModelCheckData;
 
 interface ModelContent {
-  type: 'bpmn' | 'pnml' | 'declarative';
+  type: 'bpmn' | 'pnml' | 'declarative' | 'declarative-model';
   content?: string;
   constraints?: any[];
 }
@@ -101,7 +111,7 @@ const ScoreBar: React.FC<{ label: string; value: number | null; tooltip: string 
         variant="determinate"
         value={pct}
         sx={{
-          height: 8,
+          height: 10,
           borderRadius: 4,
           backgroundColor: '#eee',
           '& .MuiLinearProgress-bar': { backgroundColor: color, borderRadius: 4 },
@@ -140,7 +150,7 @@ const ModelViewer: React.FC<{
   modelContent: ModelContent | null;
   bpmnContainerRef: React.RefObject<HTMLDivElement>;
 }> = ({ modelContent, bpmnContainerRef }) => (
-  <Paper sx={{ mb: 3, p: 2 }}>
+  <Paper sx={{ mb: 5, p: 3 }}>
     <Typography variant="h6" gutterBottom>Process Model</Typography>
 
     {/* BPMN container — always in DOM so the ref is set before the viewer effect fires */}
@@ -176,7 +186,7 @@ const ModelViewer: React.FC<{
       />
     )}
 
-    {modelContent?.type === 'declarative' && modelContent.constraints?.length && (
+    {(modelContent?.type === 'declarative' || modelContent?.type === 'declarative-model') && modelContent.constraints?.length && (
       <Box sx={{ overflowX: 'auto', maxHeight: 320, overflowY: 'auto' }}>
         <Table size="small">
           <TableHead>
@@ -184,20 +194,79 @@ const ModelViewer: React.FC<{
               <TableCell>Type</TableCell>
               <TableCell>Operand A</TableCell>
               <TableCell>Operand B</TableCell>
-              <TableCell align="right">Support</TableCell>
-              <TableCell align="right">Confidence</TableCell>
+              {modelContent.type === 'declarative-model' && <TableCell>Activation (A.)</TableCell>}
+              {modelContent.type === 'declarative-model' && <TableCell>Target (T.)</TableCell>}
+              {modelContent.type === 'declarative-model' && <TableCell>Time Window</TableCell>}
+              {modelContent.type === 'declarative-model' && <TableCell align="right">Activations</TableCell>}
+              {modelContent.type === 'declarative' && <TableCell align="right">Support</TableCell>}
+              {modelContent.type === 'declarative' && <TableCell align="right">Confidence</TableCell>}
             </TableRow>
           </TableHead>
           <TableBody>
-            {modelContent.constraints.map((c: any, i: number) => (
-              <TableRow key={i}>
-                <TableCell>{c.type}</TableCell>
-                <TableCell>{c.op_0}</TableCell>
-                <TableCell>{c.op_1 ?? '—'}</TableCell>
-                <TableCell align="right">{(c.support * 100).toFixed(1)}%</TableCell>
-                <TableCell align="right">{(c.confidence * 100).toFixed(1)}%</TableCell>
-              </TableRow>
-            ))}
+            {modelContent.constraints.map((c: any, i: number) => {
+              const neverActivated = modelContent.type === 'declarative-model' && c.total_activations === 0;
+              return (
+                <TableRow key={i} sx={{ backgroundColor: neverActivated ? '#fafafa' : undefined }}>
+                  <TableCell sx={{ fontSize: 11 }}>{c.type}</TableCell>
+                  <TableCell sx={{ fontSize: 11 }}>
+                    <Tooltip title={c.op_0} arrow placement="top">
+                      <Box component="span" sx={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'middle' }}>
+                        {c.op_0}
+                      </Box>
+                    </Tooltip>
+                  </TableCell>
+                  <TableCell sx={{ fontSize: 11 }}>
+                    <Tooltip title={c.op_1 || '—'} arrow placement="top">
+                      <Box component="span" sx={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'middle' }}>
+                        {c.op_1 || '—'}
+                      </Box>
+                    </Tooltip>
+                  </TableCell>
+                  {modelContent.type === 'declarative-model' && (
+                    <TableCell sx={{ fontSize: 10, maxWidth: 200 }}>
+                      {c.activation_condition ? (
+                        <Tooltip title={c.activation_condition} arrow placement="top">
+                          <Box component="span" sx={{ color: '#e65100', cursor: 'default', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', maxWidth: 200, verticalAlign: 'middle' }}>
+                            {c.activation_condition.length > 35 ? c.activation_condition.slice(0, 35) + '…' : c.activation_condition}
+                          </Box>
+                        </Tooltip>
+                      ) : <Box component="span" sx={{ color: '#bbb' }}>—</Box>}
+                    </TableCell>
+                  )}
+                  {modelContent.type === 'declarative-model' && (
+                    <TableCell sx={{ fontSize: 10, maxWidth: 200 }}>
+                      {c.correlation_condition ? (
+                        <Tooltip title={c.correlation_condition} arrow placement="top">
+                          <Box component="span" sx={{ color: '#6a1b9a', cursor: 'default', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', maxWidth: 200, verticalAlign: 'middle' }}>
+                            {c.correlation_condition.length > 35 ? c.correlation_condition.slice(0, 35) + '…' : c.correlation_condition}
+                          </Box>
+                        </Tooltip>
+                      ) : <Box component="span" sx={{ color: '#bbb' }}>—</Box>}
+                    </TableCell>
+                  )}
+                  {modelContent.type === 'declarative-model' && (
+                    <TableCell sx={{ fontSize: 10, maxWidth: 160 }}>
+                      {c.time_condition ? (
+                        <Tooltip title={`Raw: ${c.time_condition.raw}`} arrow placement="top">
+                          <Box component="span" sx={{ color: '#01579b', cursor: 'default', whiteSpace: 'nowrap' }}>
+                            ⏱ {formatTimeCondition(c.time_condition)}
+                          </Box>
+                        </Tooltip>
+                      ) : <Box component="span" sx={{ color: '#bbb' }}>—</Box>}
+                    </TableCell>
+                  )}
+                  {modelContent.type === 'declarative-model' && (
+                    <TableCell align="right" sx={{ fontSize: 11, color: neverActivated ? '#9e9e9e' : undefined }}>
+                      {neverActivated
+                        ? <Tooltip title="Never activated — violations are vacuous" arrow><Box component="span" sx={{ color: '#bdbdbd' }}>0 ⚠</Box></Tooltip>
+                        : c.total_activations?.toLocaleString('en-US') ?? '—'}
+                    </TableCell>
+                  )}
+                  {modelContent.type === 'declarative' && <TableCell align="right" sx={{ fontSize: 11 }}>{(c.support * 100).toFixed(1)}%</TableCell>}
+                  {modelContent.type === 'declarative' && <TableCell align="right" sx={{ fontSize: 11 }}>{(c.confidence * 100).toFixed(1)}%</TableCell>}
+                </TableRow>
+              );
+            })}
           </TableBody>
         </Table>
       </Box>
@@ -327,7 +396,7 @@ const ModelCheck: React.FC = () => {
 
   // ── Action buttons ─────────────────────────────────────────────────────────
   const renderActions = () => (
-    <Box display="flex" gap={2} justifyContent="flex-end" mt={1}>
+    <Box display="flex" gap={2} justifyContent="flex-end" mt={1} flexWrap="wrap">
       <Button
         variant="outlined"
         color="error"
@@ -335,6 +404,14 @@ const ModelCheck: React.FC = () => {
         startIcon={<ErrorOutlineIcon />}
       >
         End Analysis
+      </Button>
+      <Button
+        variant="outlined"
+        color="warning"
+        onClick={() => { resetAll(); navigate('/'); }}
+        startIcon={<ReplayIcon />}
+      >
+        Upload / Mine New Model
       </Button>
       <Tooltip
         title={!canContinue ? 'Please confirm both statements above before continuing.' : ''}
@@ -370,7 +447,7 @@ const ModelCheck: React.FC = () => {
   const highViolation = violationRate > 0.5;
 
   return (
-    <Box sx={{ maxWidth: 900, margin: '0 auto', p: 3 }}>
+    <Box sx={{ maxWidth: 1100, margin: '0 auto', p: 3 }}>
       {/* Header */}
       <Box display="flex" alignItems="center" gap={1} mb={1}>
         <Typography variant="h5" fontWeight="bold">Step 2: Process Model Error Check</Typography>

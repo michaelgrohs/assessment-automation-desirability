@@ -1,4 +1,5 @@
 # app.py
+import re
 import multiprocessing
 try:
     multiprocessing.set_start_method('fork', force=True)
@@ -82,6 +83,10 @@ last_uploaded_data = {
     "original_deviation_matrix": None,
     "deviation_labels": None,
     "impact_matrix": None,
+    "aggregated_base_matrix": None,  # issue-grouped matrix (set by /api/apply-issue-grouping)
+    "trace_features": None,  # pre-computed per-trace features (BPMN modes)
+    "resources_by_deviation": None,  # {deviation_col: [resource, ...]} computed at upload time
+    "stored_issue_map": None,  # issue_map from last /api/apply-issue-grouping call
     "mode": "bpmn",
     "atoms": None,
     "atoms_df": None,
@@ -107,6 +112,7 @@ def reset_cache():
     last_uploaded_data["deviation_matrix"] = None
     last_uploaded_data["original_deviation_matrix"] = None
     last_uploaded_data["impact_matrix"] = None
+    last_uploaded_data["aggregated_base_matrix"] = None
     last_uploaded_data["mode"] = "bpmn"
     last_uploaded_data["atoms"] = None
     last_uploaded_data["atoms_df"] = None
@@ -123,6 +129,8 @@ def reset_cache():
     last_uploaded_data["excluded_case_ids"] = []
     last_uploaded_data["excluded_by_step"] = {}
     last_uploaded_data["is_filtered"] = False
+    last_uploaded_data["resources_by_deviation"] = None
+    last_uploaded_data["stored_issue_map"] = None
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
@@ -173,6 +181,7 @@ def upload_files():
     last_uploaded_data['deviation_matrix'] = None
     last_uploaded_data['original_deviation_matrix'] = None
     last_uploaded_data['impact_matrix'] = None
+    last_uploaded_data['aggregated_base_matrix'] = None
     last_uploaded_data['atoms'] = None
     last_uploaded_data['atoms_df'] = None
     last_uploaded_data['event_log_pa'] = None
@@ -201,6 +210,14 @@ def upload_files():
     alignments = calculate_alignments(bpmn_path, xes_log)
     last_uploaded_data['alignments'] = alignments
     last_uploaded_data['mode'] = 'bpmn'
+
+    try:
+        log_df_feats = pm4py.convert_to_dataframe(xes_log)
+        last_uploaded_data['trace_features'] = _compute_trace_features(log_df_feats)
+        print("[INFO] Trace features pre-computed (BPMN upload)")
+    except Exception as e:
+        last_uploaded_data['trace_features'] = None
+        print(f"[WARN] Could not pre-compute trace features: {e}")
 
     print("Alignments computed successfully")
 
@@ -347,6 +364,7 @@ def upload_mine_model():
     last_uploaded_data['bpmn_model'] = None
     last_uploaded_data['deviation_matrix'] = None
     last_uploaded_data['impact_matrix'] = None
+    last_uploaded_data['aggregated_base_matrix'] = None
     last_uploaded_data['alignments'] = None
     last_uploaded_data['atoms'] = None
     last_uploaded_data['atoms_df'] = None
@@ -354,6 +372,14 @@ def upload_mine_model():
     last_uploaded_data['mode'] = 'bpmn'
     last_uploaded_data['alignment_status'] = 'mining'
     last_uploaded_data['alignment_error'] = None
+
+    try:
+        log_df_feats = pm4py.convert_to_dataframe(xes_log)
+        last_uploaded_data['trace_features'] = _compute_trace_features(log_df_feats)
+        print("[INFO] Trace features pre-computed (mine-model upload)")
+    except Exception as e:
+        last_uploaded_data['trace_features'] = None
+        print(f"[WARN] Could not pre-compute trace features: {e}")
 
     import threading
     t = threading.Thread(
@@ -408,6 +434,7 @@ def upload_declarative():
     last_uploaded_data['alignments'] = None
     last_uploaded_data['deviation_matrix'] = None
     last_uploaded_data['impact_matrix'] = None
+    last_uploaded_data['aggregated_base_matrix'] = None
 
     # Parse log with pm4py (for downstream compatibility)
     filename_base, file_extension = os.path.splitext(xes_path)
@@ -488,6 +515,7 @@ def upload_declarative():
         local=True,
         consider_vacuity=False,
     )
+    print(f"[declarative] Mined {len(atoms)} atoms with min_support={min_support}, consider_vacuity=False")
 
     last_uploaded_data['atoms'] = atoms
 
@@ -525,6 +553,7 @@ def upload_declarative():
                 break
 
         if the_atom is None:
+            print(f"[declarative] WARNING: no atom found for column {d!r} (skipping)")
             continue
 
         checker = RegexChecker(process_id, event_log)
@@ -540,6 +569,7 @@ def upload_declarative():
                 val for cases in variant_frame["case_ids"].values for val in cases
             )
 
+        violation_count = 0
         for j in range(len(variant_frame)):
             for case_id in variant_frame["case_ids"][j]:
                 ids = collect_data.index[collect_data['case_id'] == case_id]
@@ -547,6 +577,9 @@ def upload_declarative():
                     collect_data.loc[ids, d] = 0
                 else:
                     collect_data.loc[ids, d] = 1
+                    violation_count += 1
+
+        print(f"[declarative] Constraint {d!r}: {violation_count} violations")
 
     # Compute trace duration per case
     if timestamp_col in log_df.columns:
@@ -589,6 +622,17 @@ def upload_declarative():
     )
     collect_data = collect_data[[c for c in ordered_cols if c in collect_data.columns]]
 
+    # Merge per-trace features (event_count, rework_count, inter-event gaps, resource count)
+    try:
+        trace_features = _compute_trace_features(log_df, case_col=case_col, activity_col=activity_col,
+                                                  timestamp_col=timestamp_col)
+        collect_data = collect_data.merge(trace_features, on='trace_id', how='left')
+        print(f"[INFO] Trace features added (declarative): {[c for c in trace_features.columns if c != 'trace_id']}")
+    except Exception as feat_err:
+        import traceback
+        print(f"[WARN] Could not compute trace features (declarative): {feat_err}")
+        traceback.print_exc()
+
     last_uploaded_data['deviation_matrix'] = collect_data
     last_uploaded_data['original_deviation_matrix'] = collect_data.copy()
     last_uploaded_data['mode'] = 'declarative'
@@ -597,6 +641,26 @@ def upload_declarative():
     last_uploaded_data['is_filtered'] = False
 
     print(f"Mined {len(atoms)} constraints, matrix shape: {collect_data.shape}")
+
+    # Compute resources per deviation column (declarative-mine)
+    try:
+        decl_constraint_lookup = {}
+        atoms_df_ref = last_uploaded_data.get('atoms_df')
+        if atoms_df_ref is not None:
+            for _, row in atoms_df_ref.iterrows():
+                cname = f"{row['type']}_{row['op_0']}_{row['op_1']}"
+                decl_constraint_lookup[cname] = {
+                    'type': str(row['type']),
+                    'operands': [str(row['op_0']), str(row['op_1'])],
+                }
+        last_uploaded_data['resources_by_deviation'] = _compute_resources_by_deviation(
+            log_df, collect_data, mode='declarative', constraint_info_lookup=decl_constraint_lookup,
+            case_col=case_col, activity_col=activity_col,
+        )
+    except Exception as res_err:
+        import traceback
+        print(f"[WARN] Could not compute resources_by_deviation (declarative-mine): {res_err}")
+        traceback.print_exc()
 
     # Save mined model as .decl to mined_models/
     mined_models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mined_models')
@@ -655,6 +719,12 @@ def get_cached_deviation_matrix():
 
         df, labels = build_trace_deviation_matrix_df(log, aligned_traces)
 
+        # Merge pre-computed trace features (event_count, rework_count, inter-event gaps, resource count)
+        trace_features = last_uploaded_data.get('trace_features')
+        if trace_features is not None and not trace_features.empty:
+            df = df.merge(trace_features, on='trace_id', how='left')
+            print(f"[INFO] Trace features merged (BPMN): {[c for c in trace_features.columns if c != 'trace_id']}")
+
         last_uploaded_data["deviation_matrix"] = df
         last_uploaded_data["deviation_labels"] = labels
 
@@ -662,10 +732,136 @@ def get_cached_deviation_matrix():
         if last_uploaded_data.get("original_deviation_matrix") is None:
             last_uploaded_data["original_deviation_matrix"] = df.copy()
 
+        # Compute resources per deviation column (BPMN)
+        try:
+            log_df_res = pm4py.convert_to_dataframe(log)
+            last_uploaded_data["resources_by_deviation"] = _compute_resources_by_deviation(
+                log_df_res, df, mode='bpmn'
+            )
+        except Exception as res_err:
+            import traceback
+            print(f"[WARN] Could not compute resources_by_deviation (BPMN): {res_err}")
+            traceback.print_exc()
+
         print("✅ Deviation matrix cached.")
         print("Shape:", df.shape)
 
     return last_uploaded_data["deviation_matrix"]
+
+
+def _compute_resources_by_deviation(log_df, deviation_df, mode, constraint_info_lookup=None,
+                                     case_col='case:concept:name', activity_col='concept:name'):
+    """
+    For each binary deviation column in deviation_df, compute which org:resource values
+    are responsible for that deviation.
+
+    BPMN:
+      (Insert X): resources from events with activity X in DEVIATING traces
+                  (they inserted an activity that shouldn't be there)
+      (Skip X):   resources from events with activity X across ALL traces
+                  (they normally execute X, but skipped it in deviating traces)
+
+    Declarative — depends on constraint semantics:
+      Insertion-like (Absence, Not* constraints):
+          the violating activity exists when it shouldn't →
+          resources from events with the target activity in DEVIATING traces
+      Skip-like (Existence, Response, Precedence, Succession, …):
+          the required activity is missing →
+          resources from events with the target activity across ALL traces
+          (those who normally perform it, but didn't in deviating traces)
+    """
+    NON_META = {
+        'trace_id', 'trace_duration_seconds', 'activities',
+        'event_count', 'rework_count', 'max_inter_event_gap_seconds',
+        'avg_inter_event_gap_seconds', 'unique_resource_count',
+    }
+
+    # Find resource column
+    resource_col = None
+    for rc in ('org:resource', 'org:group', 'Resource'):
+        if rc in log_df.columns:
+            resource_col = rc
+            break
+    if resource_col is None:
+        print(f"[WARN] _compute_resources_by_deviation: no resource column found. Columns: {list(log_df.columns)}")
+        return {}
+
+    print(f"[INFO] _compute_resources_by_deviation: case_col={case_col!r}, activity_col={activity_col!r}, resource_col={resource_col!r}, mode={mode}")
+
+    # Pre-build: activity → resources from ALL traces (for skip-like lookups)
+    act_all_resources = {}
+    for act, grp in log_df.groupby(activity_col)[resource_col]:
+        act_all_resources[str(act)] = set(grp.dropna().astype(str))
+
+    # DECLARE constraint type → (skip_like, operand_index_for_target_activity)
+    # skip_like=True  → look in ALL traces for that activity
+    # skip_like=False → look in DEVIATING traces for that activity
+    CONSTRAINT_SEMANTICS = {
+        # Skip-like: target activity is missing in violations
+        'Existence': (True, 0), 'Existence1': (True, 0), 'Existence2': (True, 0),
+        'Init': (True, 0), 'End': (True, 0),
+        'Response': (True, 1), 'ChainResponse': (True, 1), 'AlternateResponse': (True, 1),
+        'RespondedExistence': (True, 1), 'CoExistence': (True, 1),
+        'Precedence': (True, 0), 'ChainPrecedence': (True, 0), 'AlternatePrecedence': (True, 0),
+        'Succession': (True, 1), 'ChainSuccession': (True, 1), 'AlternateSuccession': (True, 1),
+        # Insertion-like: target activity appears when it shouldn't
+        'Absence': (False, 0), 'Absence1': (False, 0), 'Absence2': (False, 0),
+        'NotResponse': (False, 1), 'NotChainResponse': (False, 1), 'NotAlternateResponse': (False, 1),
+        'NotPrecedence': (False, 1), 'NotChainPrecedence': (False, 1), 'NotAlternatePrecedence': (False, 1),
+        'NotSuccession': (False, 1), 'NotChainSuccession': (False, 1), 'NotAlternateSuccession': (False, 1),
+        'NotCoExistence': (False, 1), 'NotRespondedExistence': (False, 1),
+    }
+
+    result = {}
+
+    for col in deviation_df.columns:
+        if col in NON_META:
+            continue
+        col_vals = set(deviation_df[col].dropna().unique())
+        if not col_vals.issubset({0, 1, 0.0, 1.0}):
+            continue
+
+        deviating_ids = set(deviation_df.loc[deviation_df[col] == 1, 'trace_id'].astype(str))
+
+        if mode == 'bpmn':
+            m_ins = re.match(r'\(Insert (.+?)\)$', col)
+            m_skip = re.match(r'\(Skip (.+?)\)$', col)
+            if m_ins:
+                act = m_ins.group(1)
+                mask = (log_df[case_col].astype(str).isin(deviating_ids)) & (log_df[activity_col] == act)
+                resources = sorted(log_df.loc[mask, resource_col].dropna().astype(str).unique())
+            elif m_skip:
+                act = m_skip.group(1)
+                resources = sorted(act_all_resources.get(act, set()))
+            else:
+                resources = []
+        else:
+            # Declarative
+            info = (constraint_info_lookup or {}).get(col, {})
+            ctype = info.get('type', '')
+            operands = info.get('operands', [])
+
+            if not ctype or not operands:
+                # Fallback: all resources from deviating traces
+                mask = log_df[case_col].astype(str).isin(deviating_ids)
+                resources = sorted(log_df.loc[mask, resource_col].dropna().astype(str).unique())
+            else:
+                semantics = CONSTRAINT_SEMANTICS.get(ctype)
+                if semantics is None:
+                    mask = log_df[case_col].astype(str).isin(deviating_ids)
+                    resources = sorted(log_df.loc[mask, resource_col].dropna().astype(str).unique())
+                else:
+                    skip_like, op_idx = semantics
+                    target_act = operands[op_idx] if op_idx < len(operands) else operands[0]
+                    if skip_like:
+                        resources = sorted(act_all_resources.get(target_act, set()))
+                    else:
+                        mask = (log_df[case_col].astype(str).isin(deviating_ids)) & (log_df[activity_col] == target_act)
+                        resources = sorted(log_df.loc[mask, resource_col].dropna().astype(str).unique())
+
+        result[col] = resources
+
+    return result
 
 
 def _atoms_to_decl_string(atoms) -> str:
@@ -741,7 +937,7 @@ def _compute_trace_features(log_df: pd.DataFrame, case_col: str = 'case:concept:
         else:
             features['unique_resource_count'] = float('nan')
 
-    return features.reset_index().rename(columns={'trace_id': 'trace_id'})
+    return features.reset_index()
 
 
 def _diagnose_declare_violations(declare_model, d4py_log, violations_df, case_ids_ordered):
@@ -1031,6 +1227,7 @@ def upload_declarative_model():
     last_uploaded_data['alignments'] = None
     last_uploaded_data['deviation_matrix'] = None
     last_uploaded_data['impact_matrix'] = None
+    last_uploaded_data['aggregated_base_matrix'] = None
     last_uploaded_data['atoms'] = None
     last_uploaded_data['atoms_df'] = None
     last_uploaded_data['event_log_pa'] = None
@@ -1207,6 +1404,21 @@ def upload_declarative_model():
         })
     last_uploaded_data['decl_constraint_info'] = decl_constraint_info
 
+    # Compute resources per deviation column (declarative-model)
+    try:
+        decl_constraint_lookup = {
+            info['col_name']: {'type': info['type'], 'operands': info['operands']}
+            for info in decl_constraint_info
+        }
+        last_uploaded_data['resources_by_deviation'] = _compute_resources_by_deviation(
+            log_df, last_uploaded_data['deviation_matrix'], mode='declarative-model',
+            constraint_info_lookup=decl_constraint_lookup
+        )
+    except Exception as res_err:
+        import traceback
+        print(f"[WARN] Could not compute resources_by_deviation (declarative-model): {res_err}")
+        traceback.print_exc()
+
     print(f"Uploaded .decl model: {len(model_constraints)} constraints, {len(case_ids_ordered)} traces, matrix shape: {collect_data.shape}")
 
     return jsonify({
@@ -1368,15 +1580,80 @@ def get_current_impact_matrix():
 
     if last_uploaded_data.get("impact_matrix") is not None:
         df = last_uploaded_data["impact_matrix"]
+    elif last_uploaded_data.get("aggregated_base_matrix") is not None:
+        df = last_uploaded_data["aggregated_base_matrix"]
     else:
         df = get_cached_deviation_matrix()
 
+    print(f"[current-impact-matrix] returning {df.shape[1]} cols: {list(df.columns)}")
     return jsonify({
         "columns": list(df.columns),
         "rows": df.to_dict(orient="records"),
         "total_rows": df.shape[0],
         "total_columns": df.shape[1]
     })
+
+@app.route("/api/apply-issue-grouping", methods=["POST"])
+def apply_issue_grouping():
+    """Create aggregated impact matrix: AND-combine merged deviation columns into issue columns."""
+    data = request.json
+    issue_map = data.get("issue_map", {})  # original_col → issue_name
+    exclude_cols = set(data.get("exclude_cols", []))  # cols to drop entirely (logging errors etc.)
+
+    base_df = get_cached_deviation_matrix().copy()
+
+    if not issue_map and not exclude_cols:
+        # No grouping: use original matrix as-is
+        last_uploaded_data["aggregated_base_matrix"] = base_df
+        last_uploaded_data["impact_matrix"] = None
+        return jsonify({"status": "success", "columns": list(base_df.columns)})
+
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for col, issue_name in issue_map.items():
+        if col in base_df.columns:
+            groups[issue_name].append(col)
+
+    # Remove original deviation columns and excluded columns from base
+    drop_cols = set(issue_map.keys()) | exclude_cols
+    base_cols = [c for c in base_df.columns if c not in drop_cols]
+    new_df = base_df[base_cols].copy()
+
+    # AND-combine (min of binary) merged groups; single col: direct copy under issue name
+    for issue_name, cols in groups.items():
+        if len(cols) == 1:
+            new_df[issue_name] = base_df[cols[0]].values
+        else:
+            new_df[issue_name] = base_df[cols].min(axis=1).values
+
+    # Drop any remaining deviation columns not covered by the issue_map
+    # (e.g. zero-violation cols absent from the deviation-selection response)
+    mode = last_uploaded_data.get('mode', 'bpmn')
+    issue_name_cols = set(groups.keys())
+    non_meta = {
+        'trace_id', 'trace_duration_seconds', 'activities',
+        'event_count', 'rework_count', 'max_inter_event_gap_seconds',
+        'avg_inter_event_gap_seconds', 'unique_resource_count',
+    }
+    if mode == 'bpmn':
+        leftover_devs = [
+            c for c in new_df.columns
+            if (c.startswith('(Skip ') or c.startswith('(Insert ')) and c not in issue_name_cols
+        ]
+    else:
+        leftover_devs = [
+            c for c in new_df.columns
+            if c not in non_meta and c not in issue_name_cols and c != 'trace_id'
+            and set(new_df[c].dropna().unique()).issubset({0, 1, 0.0, 1.0})
+        ]
+    if leftover_devs:
+        new_df = new_df.drop(columns=leftover_devs)
+
+    last_uploaded_data["aggregated_base_matrix"] = new_df
+    last_uploaded_data["impact_matrix"] = None  # reset dimension-layer so it rebuilds on top of new base
+    last_uploaded_data["stored_issue_map"] = dict(issue_map)  # persist for workaround-resources aggregation
+    return jsonify({"status": "success", "columns": list(new_df.columns)})
+
 
 @app.route("/api/configure-dimensions", methods=["POST"])
 def configure_dimensions():
@@ -1388,8 +1665,9 @@ def configure_dimensions():
 
     if last_uploaded_data.get("mode") == "bpmn" and last_uploaded_data.get("bpmn_path") is None:
         raise ValueError("No BPMN model loaded.")
-    # ✅ get the already cached trace x deviation matrix
-    df = get_cached_deviation_matrix().copy()
+    # Use aggregated base matrix if available (set by apply-issue-grouping), else raw cached matrix
+    base = last_uploaded_data.get("aggregated_base_matrix")
+    df = base.copy() if base is not None else get_cached_deviation_matrix().copy()
 
     for dim in dimension_configs:
 
@@ -1453,90 +1731,64 @@ def configure_dimensions():
 
         elif comp_type == "rule":
 
-            column = config["column"]
+            # Support compound { conditions: [{column, operator, value, connector?}...] }
+            # and legacy flat { column, operator, value } formats
+            conditions_raw = config.get("conditions")
+            if conditions_raw:
+                conditions = conditions_raw
+            else:
+                col_flat = config.get("column")
+                if not col_flat:
+                    return jsonify({"error": f"No column selected for rule dimension '{dimension}'"}), 400
+                conditions = [{"column": col_flat, "operator": config.get("operator"), "value": config.get("value")}]
 
-            operator = config.get("operator")
+            if not conditions:
+                return jsonify({"error": f"No conditions defined for rule dimension '{dimension}'"}), 400
 
-            value = config.get("value")
-
-            if column not in df.columns:
-                return jsonify({"error": f"Column '{column}' not found"}), 400
+            def _eval_cond(col, operator, value):
+                if not col:
+                    raise ValueError("No column selected in condition")
+                if col not in df.columns:
+                    raise ValueError(f"Column '{col}' not found")
+                if operator == "equals":
+                    return df[col] == value
+                elif operator == "not_equals":
+                    return df[col] != value
+                elif operator == "contains":
+                    return df[col].apply(lambda x: any(str(value) in str(v) for v in x) if isinstance(x, list) else str(value) in str(x))
+                elif operator == "starts_with":
+                    return df[col].apply(lambda x: any(str(v).startswith(str(value)) for v in x) if isinstance(x, list) else str(x).startswith(str(value)))
+                elif operator == "ends_with":
+                    return df[col].apply(lambda x: any(str(v).endswith(str(value)) for v in x) if isinstance(x, list) else str(x).endswith(str(value)))
+                elif operator == "greater":
+                    return df[col] > float(value)
+                elif operator == "less":
+                    return df[col] < float(value)
+                elif operator == "greater_equal":
+                    return df[col] >= float(value)
+                elif operator == "less_equal":
+                    return df[col] <= float(value)
+                else:
+                    raise ValueError(f"Unsupported operator: {operator}")
 
             try:
+                combined = None
+                for cond in conditions:
+                    cond_col = cond.get("column", "")
+                    cond_op  = cond.get("operator", "")
+                    cond_val = cond.get("value", "")
+                    connector = cond.get("connector", "AND")
+                    cond_result = _eval_cond(cond_col, cond_op, cond_val)
+                    if combined is None:
+                        combined = cond_result
+                    elif connector == "OR":
+                        combined = combined | cond_result
+                    else:
+                        combined = combined & cond_result
 
-                if operator == "equals":
-
-                    result = df[column] == value
-
-
-                elif operator == "not_equals":
-
-                    result = df[column] != value
-
-
-
-                elif operator == "contains":
-
-                    result = df[column].apply(
-
-                        lambda x: any(str(value) in str(v) for v in x) if isinstance(x, list) else str(value) in str(x)
-
-                    )
-
-
-
-
-                elif operator == "starts_with":
-
-                    result = df[column].apply(
-
-                        lambda x: any(str(v).startswith(str(value)) for v in x) if isinstance(x, list) else str(
-                            x).startswith(str(value))
-
-                    )
-
-
-
-
-                elif operator == "ends_with":
-
-                    result = df[column].apply(
-
-                        lambda x: any(str(v).endswith(str(value)) for v in x) if isinstance(x, list) else str(
-                            x).endswith(str(value))
-
-                    )
-
-
-                elif operator == "greater":
-
-                    result = df[column] > float(value)
-
-
-                elif operator == "less":
-
-                    result = df[column] < float(value)
-
-
-                elif operator == "greater_equal":
-
-                    result = df[column] >= float(value)
-
-
-                elif operator == "less_equal":
-
-                    result = df[column] <= float(value)
-
-
-                else:
-
-                    return jsonify({"error": f"Unsupported operator: {operator}"}), 400
-
-                df[dimension] = result.astype(int)
-
+                df[dimension] = combined.astype(int)
 
             except Exception as e:
-
                 return jsonify({"error": f"Invalid rule: {str(e)}"}), 400
 
     # ✅ store result inside your cache dict instead of global variable
@@ -1576,9 +1828,22 @@ def compute_causal_effects():
             if dev not in df.columns or dim not in df.columns:
                 continue
 
+            # Skip degenerate cases: zero variance in treatment or outcome causes
+            # statsmodels divide-by-zero warnings and meaningless estimates
+            if df[dev].nunique() < 2 or df[dim].nunique() < 2:
+                results.append({
+                    "deviation": dev,
+                    "dimension": dim,
+                    "ate": 0.0,
+                    "p_value": 1.0,
+                    "error": "No variation in treatment or outcome — effect is undefined"
+                })
+                continue
+
             graph = f'digraph {{ "{dev}" -> "{dim}" }}'
 
             try:
+                import warnings
                 model = dowhymodel(
                     data=df,
                     treatment=dev,
@@ -1590,13 +1855,14 @@ def compute_causal_effects():
                     proceed_when_unidentifiable=True
                 )
 
-                estimate = model.estimate_effect(
-                    identified_estimand,
-                    method_name="backdoor.linear_regression",
-                    test_significance=True
-                )
-
-                significance = estimate.test_stat_significance()
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=RuntimeWarning)
+                    estimate = model.estimate_effect(
+                        identified_estimand,
+                        method_name="backdoor.linear_regression",
+                        test_significance=True
+                    )
+                    significance = estimate.test_stat_significance()
 
                 results.append({
                     "deviation": dev,
@@ -1923,27 +2189,39 @@ def recompute_filtered_log():
     last_uploaded_data['excluded_case_ids'] = list(exclude_case_ids)
     last_uploaded_data['excluded_by_step'] = excluded_by_step
     last_uploaded_data['is_filtered'] = excluded_count > 0
-    last_uploaded_data['impact_matrix'] = None   # invalidate downstream
+    last_uploaded_data['impact_matrix'] = None
+    last_uploaded_data['aggregated_base_matrix'] = None   # invalidate downstream
 
     if mode == 'bpmn':
-        bpmn_path = last_uploaded_data.get('bpmn_path')
-        if not bpmn_path:
-            return jsonify({"error": "No BPMN model loaded"}), 400
+        # Slice cached alignments — do NOT recompute (alignments are non-deterministic;
+        # recomputing would produce different results from the original analysis).
+        original_alignments = get_cached_alignments()
+        original_log = get_cached_xes_log()
 
-        print(f"⚙️ Recomputing alignments for {filtered_count} traces…")
-        filtered_alignments = calculate_alignments(bpmn_path, filtered_log)
+        filtered_alignments = [
+            original_alignments[i]
+            for i, trace in enumerate(original_log)
+            if str(trace.attributes.get('concept:name', '')) not in exclude_case_ids
+        ]
         last_uploaded_data['filtered_alignments'] = filtered_alignments
+        print(f"✂️ Sliced alignments: {len(original_alignments)} → {len(filtered_alignments)} (removed {len(original_alignments) - len(filtered_alignments)})")
 
         df, labels = build_trace_deviation_matrix_df(filtered_log, filtered_alignments)
+        trace_features = last_uploaded_data.get('trace_features')
+        if trace_features is not None and not trace_features.empty:
+            df = df.merge(trace_features, on='trace_id', how='left')
         last_uploaded_data['deviation_matrix'] = df
         last_uploaded_data['deviation_labels'] = labels
         print(f"✅ Filtered deviation matrix shape: {df.shape}")
 
+        filtered_events = sum(len(t) for t in filtered_log)
         return jsonify({
             "original_count": original_count,
             "filtered_count": filtered_count,
             "excluded_count": excluded_count,
+            "filtered_events": filtered_events,
             "alignment_count": len(filtered_alignments),
+            "excluded_by_step": {k: list(set(v)) for k, v in excluded_by_step.items()},
         })
 
     else:  # declarative — filter rows from original matrix
@@ -1955,10 +2233,13 @@ def recompute_filtered_log():
             filtered_matrix = orig_matrix.copy() if orig_matrix is not None else pd.DataFrame()
 
         last_uploaded_data['deviation_matrix'] = filtered_matrix
+        filtered_events = sum(len(t) for t in filtered_log)
         return jsonify({
             "original_count": original_count,
             "filtered_count": filtered_count,
             "excluded_count": excluded_count,
+            "filtered_events": filtered_events,
+            "excluded_by_step": {k: list(set(v)) for k, v in excluded_by_step.items()},
         })
 
 
@@ -2153,8 +2434,9 @@ def get_process_variants():
     from collections import Counter
 
     # Prefer original (unfiltered) matrix so variants aren't missing after filters applied
-    matrix = (last_uploaded_data.get('original_deviation_matrix')
-              or last_uploaded_data.get('deviation_matrix'))
+    matrix = last_uploaded_data.get('original_deviation_matrix')
+    if matrix is None:
+        matrix = last_uploaded_data.get('deviation_matrix')
     log = last_uploaded_data.get('xes_log')
 
     if matrix is not None and not matrix.empty and 'activities' in matrix.columns:
@@ -2298,8 +2580,27 @@ def get_deviation_selection():
     if matrix is None or matrix.empty:
         return jsonify({"error": "No deviation matrix available"}), 400
 
+    # Build constraint-info lookup
+    constraint_info_by_col = {}
+    if mode == 'declarative-model':
+        for info in (last_uploaded_data.get('decl_constraint_info') or []):
+            constraint_info_by_col[info['col_name']] = info
+    elif mode == 'declarative':
+        atoms_df = last_uploaded_data.get('atoms_df')
+        if atoms_df is not None and len(atoms_df) > 0:
+            for _, row in atoms_df.iterrows():
+                col_name = f"{row['type']}_{row['op_0']}_{row['op_1']}"
+                constraint_info_by_col[col_name] = {
+                    'support': float(row.get('support', 0)),
+                    'confidence': float(row.get('confidence', 0)),
+                }
+
     total_traces = len(matrix)
-    non_meta = {'trace_id', 'trace_duration_seconds', 'activities'}
+    non_meta = {
+        'trace_id', 'trace_duration_seconds', 'activities',
+        'event_count', 'rework_count', 'max_inter_event_gap_seconds',
+        'avg_inter_event_gap_seconds', 'unique_resource_count',
+    }
 
     if mode == 'bpmn':
         dev_cols = [c for c in matrix.columns if c.startswith('(Skip ') or c.startswith('(Insert ')]
@@ -2309,7 +2610,7 @@ def get_deviation_selection():
             if col in non_meta:
                 continue
             unique_vals = set(matrix[col].dropna().unique())
-            if unique_vals.issubset({0, 1, 0.0, 1.0}) and '_' in col:
+            if unique_vals.issubset({0, 1, 0.0, 1.0}):
                 dev_cols.append(col)
 
     deviations = []
@@ -2349,22 +2650,240 @@ def get_deviation_selection():
             label = f"Insert: {col[8:-1]}"
             dev_type = "insertion"
         else:
-            parts = col.split('_', 2)
-            dev_type = parts[0]
-            label = f"{parts[0]}: {parts[1]} \u2192 {parts[2]}" if len(parts) == 3 else col
+            cinfo_pre = constraint_info_by_col.get(col, {})
+            if mode == 'declarative-model' and cinfo_pre.get('operands'):
+                ops = cinfo_pre['operands']
+                dev_type = cinfo_pre.get('type', col)
+                arrow = f"{ops[0]} \u2192 {ops[1]}" if len(ops) >= 2 else ops[0]
+                label = f"{dev_type}: {arrow}"
+            else:
+                parts = col.split('_', 2)
+                dev_type = parts[0]
+                if len(parts) == 3 and parts[2] != 'None':
+                    label = f"{parts[0]}: {parts[1]} \u2192 {parts[2]}"
+                elif len(parts) >= 2:
+                    label = f"{parts[0]}: {parts[1]}"
+                else:
+                    label = col
 
+        cinfo = constraint_info_by_col.get(col, {})
         deviations.append({
             "column": col,
             "label": label,
             "type": dev_type,
             "affected_count": affected_count,
             "affected_percentage": affected_pct,
-            "top_variants": top_variants
+            "top_variants": top_variants,
+            "activation_condition": cinfo.get('activation_condition'),
+            "correlation_condition": cinfo.get('correlation_condition'),
+            "time_condition": cinfo.get('time_condition'),
+            "total_activations": cinfo.get('total_activations'),
+            "violation_diagnostics": cinfo.get('violation_diagnostics'),
+            "support": cinfo.get('support'),
+            "confidence": cinfo.get('confidence'),
         })
 
     deviations.sort(key=lambda x: -x["affected_count"])
 
     return jsonify({"deviations": deviations, "total_traces": total_traces})
+
+
+@app.route('/api/deviation-correlations', methods=['GET'])
+def get_deviation_correlations():
+    """Return pairwise co-occurrence counts for all deviations."""
+    matrix = get_cached_deviation_matrix()
+    mode = last_uploaded_data.get('mode', 'bpmn')
+
+    if matrix is None or matrix.empty:
+        return jsonify({"correlations": [], "total_traces": 0})
+
+    non_meta = {
+        'trace_id', 'trace_duration_seconds', 'activities',
+        'event_count', 'rework_count', 'max_inter_event_gap_seconds',
+        'avg_inter_event_gap_seconds', 'unique_resource_count',
+    }
+
+    if mode == 'bpmn':
+        dev_cols = [c for c in matrix.columns if c.startswith('(Skip ') or c.startswith('(Insert ')]
+    else:
+        dev_cols = []
+        for col in matrix.columns:
+            if col in non_meta:
+                continue
+            unique_vals = set(matrix[col].dropna().unique())
+            if unique_vals.issubset({0, 1, 0.0, 1.0}):
+                dev_cols.append(col)
+
+    dev_cols = [c for c in dev_cols if int((matrix[c] == 1).sum()) > 0]
+    total = len(matrix)
+
+    correlations = []
+    for i, col_a in enumerate(dev_cols):
+        for col_b in dev_cols[i + 1:]:
+            both = int(((matrix[col_a] == 1) & (matrix[col_b] == 1)).sum())
+            if both > 0:
+                count_a = int((matrix[col_a] == 1).sum())
+                count_b = int((matrix[col_b] == 1).sum())
+                correlations.append({
+                    "col_a": col_a,
+                    "col_b": col_b,
+                    "count": both,
+                    "percentage": round(both / total * 100, 1),
+                    "jaccard": round(both / (count_a + count_b - both), 3) if (count_a + count_b - both) > 0 else 0,
+                })
+
+    correlations.sort(key=lambda x: -x["count"])
+    return jsonify({"correlations": correlations, "total_traces": total})
+
+
+@app.route('/api/ollama/models', methods=['GET'])
+def api_ollama_models():
+    import urllib.request
+    try:
+        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        models = [m["name"] for m in data.get("models", [])]
+        return jsonify({"models": models, "online": True})
+    except Exception as e:
+        return jsonify({"models": [], "online": False, "error": str(e)})
+
+
+@app.route('/api/ollama/pull', methods=['POST'])
+def api_ollama_pull():
+    import urllib.request
+    data = request.get_json(force=True)
+    model = data.get('model', 'llama3.2')
+    payload = json.dumps({"name": model, "stream": False}).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            "http://localhost:11434/api/pull",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        return jsonify({"status": result.get("status", "success")})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/llm-suggestion', methods=['POST'])
+def api_llm_suggestion():
+    import urllib.request
+    data = request.get_json(force=True)
+    deviation = data.get('deviation', '')
+    direction = data.get('direction', 'neutral')  # 'positive', 'negative', 'neutral'
+    causal_effects = data.get('causal_effects', [])  # [{dimension, ate, criticality}]
+    top_rule = data.get('top_rule', None)
+    model = data.get('model', 'llama3.2')
+    all_activities = data.get('all_activities', [])
+
+    effects_lines = "\n".join(
+        f"  - {e['dimension']}: CATE={e['ate']:.3f} ({e['criticality']})"
+        for e in causal_effects if e.get('ate') is not None
+    )
+    rule_line = f"\nKey predictive pattern: {top_rule}" if top_rule else ""
+
+    if direction == 'negative':
+        action = "avoid or reduce this deviation"
+    elif direction == 'positive':
+        action = "encourage or institutionalize this deviation as a standard practice"
+    else:
+        action = "monitor this deviation without urgent intervention"
+
+    activities_block = ""
+    if all_activities:
+        activities_list = ", ".join(f'"{a}"' for a in all_activities[:80])
+        activities_block = f"""
+All activity names observed in the process log:
+{activities_list}
+
+Step 1 — Infer the process domain: Based on the activity names above, identify what kind of real-world process this likely is (e.g. healthcare, logistics, finance, IT service management, manufacturing). Look at the nouns (objects) and verbs (actions) in the activity names to reason about the domain and the process flow.
+"""
+
+    prompt = f"""You are a process improvement consultant analyzing a business process.
+{activities_block}
+A process deviation called "{deviation}" has been detected.
+Overall impact direction: {direction}.
+Causal effects on process dimensions:
+{effects_lines}{rule_line}
+
+Step 2 — Give 3 concise, actionable recommendations to {action}.
+Ground your recommendations in the inferred process domain and the specific activities involved. Be specific and practical. Use bullet points. Do not repeat the input data."""
+
+    payload = json.dumps({
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"num_predict": 500, "temperature": 0.7}
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            "http://localhost:11434/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        return jsonify({"suggestion": result.get("response", "").strip()})
+    except Exception as e:
+        return jsonify({"error": f"Ollama error: {str(e)}"}), 500
+
+
+@app.route('/api/workaround-resources', methods=['GET'])
+def get_workaround_resources():
+    """
+    For each issue column in the aggregated matrix, return the org:resource values responsible.
+
+    Uses resources_by_deviation (computed at upload time with insertion/skip semantics) and
+    stored_issue_map (original_col → issue_name) to aggregate per-issue resources.
+    """
+    matrix = last_uploaded_data.get('aggregated_base_matrix')
+    if matrix is None:
+        matrix = get_cached_deviation_matrix()
+    if matrix is None or matrix.empty:
+        return jsonify({'resources_by_issue': {}})
+
+    non_meta = {
+        'trace_id', 'trace_duration_seconds', 'activities',
+        'event_count', 'rework_count', 'max_inter_event_gap_seconds',
+        'avg_inter_event_gap_seconds', 'unique_resource_count',
+    }
+    DIMENSION_NAMES = {'time', 'costs', 'quality', 'outcome', 'compliance'}
+
+    issue_cols = [
+        c for c in matrix.columns
+        if c not in non_meta and c not in DIMENSION_NAMES and c != 'trace_id'
+        and set(matrix[c].dropna().unique()).issubset({0, 1, 0.0, 1.0})
+    ]
+
+    resources_by_deviation = last_uploaded_data.get('resources_by_deviation') or {}
+    stored_issue_map = last_uploaded_data.get('stored_issue_map') or {}
+
+    # Build reverse map: issue_name → list of original deviation columns
+    issue_to_devs: dict = {}
+    for dev_col, issue_name in stored_issue_map.items():
+        issue_to_devs.setdefault(issue_name, []).append(dev_col)
+
+    resources_by_issue = {}
+    for issue in issue_cols:
+        devs_for_issue = issue_to_devs.get(issue, [])
+        if devs_for_issue:
+            # Union resources from all original deviations that were merged into this issue
+            merged = set()
+            for dev in devs_for_issue:
+                merged.update(resources_by_deviation.get(dev, []))
+            resources_by_issue[issue] = sorted(merged)
+        else:
+            # Issue name was not in the map (e.g. ungrouped single deviation kept as-is)
+            # Fall back to the resources computed for that column directly (if same name exists)
+            resources_by_issue[issue] = sorted(resources_by_deviation.get(issue, []))
+
+    return jsonify({'resources_by_issue': resources_by_issue})
 
 
 if __name__ == '__main__':

@@ -31,7 +31,7 @@ import { useNavigate } from 'react-router-dom';
 import { useBottomNav } from './BottomNavContext';
 import { useFileContext } from './FileContext';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5000';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:1965';
 
 interface VariantItem {
   sequence: string[];
@@ -187,7 +187,7 @@ const OutlierTable: React.FC<{
 const LogQualityCheck: React.FC = () => {
   const navigate = useNavigate();
   const { setContinue } = useBottomNav();
-  const { filterSummary, applyAndRecompute } = useFileContext();
+  const { filterSummary, filterResult, applyAndRecompute } = useFileContext();
 
   const [data, setData] = useState<LogQualityData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -353,7 +353,7 @@ const LogQualityCheck: React.FC = () => {
         </Tooltip>
       </Box>
       <Typography variant="body2" color="text.secondary" gutterBottom>
-        Filtering is optional. Cases you exclude here will be removed and alignments will be
+        Filtering is optional. Cases you exclude here will be removed and conformance results will be
         recomputed before subsequent steps.
       </Typography>
 
@@ -376,6 +376,37 @@ const LogQualityCheck: React.FC = () => {
           severity={hasAnomalies || hasOutliers ? 'warning' : 'ok'}
         />
       </Box>
+
+      {/* Filtered stats — shown after recompute */}
+      {filterResult?.isFiltered && (
+        <Box mb={3} p={2} sx={{ background: '#fff8e1', borderRadius: 2, border: '1px solid #ffe082' }}>
+          <Typography variant="subtitle2" sx={{ mb: 1.5, color: '#e65100' }}>
+            After filtering: {filterResult.filteredCount.toLocaleString('en-US')} cases remaining
+            ({filterResult.excludedCount.toLocaleString('en-US')} removed)
+            {filterResult.filteredEvents > 0 && ` · ${filterResult.filteredEvents.toLocaleString('en-US')} events`}
+          </Typography>
+          <Box display="flex" gap={1.5} flexWrap="wrap">
+            {(filterResult.excludedByStep['step1'] ?? []).length > 0 && (
+              <Tooltip title={`Case IDs: ${(filterResult.excludedByStep['step1'] ?? []).slice(0, 10).join(', ')}${(filterResult.excludedByStep['step1'] ?? []).length > 10 ? '…' : ''}`} arrow>
+                <Chip size="small" variant="outlined" color="warning"
+                  label={`Outliers / anomalies: ${(filterResult.excludedByStep['step1'] ?? []).length} cases`} />
+              </Tooltip>
+            )}
+            {filterSummary.step1_variant_sequences.length > 0 && (
+              <Chip size="small" variant="outlined" color="warning"
+                label={`Variants: ${filterSummary.step1_variant_sequences.length} variant(s)`} />
+            )}
+            {(filterResult.excludedByStep['step1b'] ?? []).length > 0 && (
+              <Chip size="small" variant="outlined" color="warning"
+                label={`Logging errors: ${(filterResult.excludedByStep['step1b'] ?? []).length} cases`} />
+            )}
+            {(filterResult.excludedByStep['step3'] ?? []).length > 0 && (
+              <Chip size="small" variant="outlined" color="warning"
+                label={`Step 3 exceptions: ${(filterResult.excludedByStep['step3'] ?? []).length} cases`} />
+            )}
+          </Box>
+        </Box>
+      )}
 
       {!hasAnomalies && !hasMissingData && !hasOutliers && (
         <Alert icon={<CheckCircleOutlineIcon />} severity="success" sx={{ mb: 2 }}>
@@ -605,7 +636,7 @@ const LogQualityCheck: React.FC = () => {
               <PlaylistRemoveIcon color="action" fontSize="small" />
               <Typography variant="h6">Process Variant Filtering</Typography>
               <Tooltip
-                title="Mark entire process variants for removal. All cases following the selected activity sequences will be excluded and alignments recomputed."
+                title="Mark entire process variants for removal. All cases following the selected activity sequences will be excluded and conformance results recomputed."
                 arrow
                 placement="right"
               >
@@ -697,7 +728,7 @@ const LogQualityCheck: React.FC = () => {
           <CardContent>
             <Typography variant="h6" gutterBottom>Apply Filters &amp; Recompute</Typography>
             <Typography variant="body2" color="text.secondary" gutterBottom>
-              Cases excluded here are removed from the event log. Alignments and deviation
+              Cases excluded here are removed from the event log. Conformance results and deviation
               frequencies are recomputed on the remaining cases before subsequent steps.
             </Typography>
 
@@ -746,11 +777,11 @@ const LogQualityCheck: React.FC = () => {
               >
                 {applying
                   ? 'Recomputing…'
-                  : `Apply & Recompute Alignments${hasFiltersSelected ? ` (${totalSelected} cases)` : ''}`}
+                  : `Apply & Recompute${hasFiltersSelected ? ` (${totalSelected} cases)` : ''}`}
               </Button>
               {applied && (
                 <Chip
-                  label="Alignments recomputed successfully"
+                  label="Recomputed successfully"
                   color="success"
                   size="small"
                   icon={<CheckCircleOutlineIcon />}

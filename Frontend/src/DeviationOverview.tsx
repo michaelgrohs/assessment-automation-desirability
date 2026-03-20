@@ -44,7 +44,7 @@ ChartJS.register(
   Legend
 );
 
-const API_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
+const API_URL = process.env.REACT_APP_API_URL || "http://localhost:1965";
 
 interface DeviationItem {
   activity: string;
@@ -239,19 +239,11 @@ const DeviationOverview: React.FC = () => {
     }
   }, [modelType, modelContent]);
 
-  const apiUrl = process.env.REACT_APP_API_URL;
-
   // =========================
   // Fetch Deviation Data
   // =========================
   useEffect(() => {
-    if (!apiUrl) {
-      setError('API URL is not defined. Check your .env file and restart React.');
-      setLoading(false);
-      return;
-    }
-
-    fetch(`${apiUrl}/api/deviation-overview`)
+    fetch(`${API_URL}/api/deviation-overview`)
       .then(async (res) => {
         const json = await res.json();
         if (!res.ok) {
@@ -271,7 +263,7 @@ const DeviationOverview: React.FC = () => {
         setError(err.message);
         setLoading(false);
       });
-  }, [apiUrl, conformanceMode]);
+  }, [conformanceMode]);
 
   const createHistogram = (values: number[], bins = 20) => {
     const min = Math.min(...values);

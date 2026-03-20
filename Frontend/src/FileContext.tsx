@@ -1,6 +1,6 @@
 import React, { createContext, useState, useContext, ReactNode, useCallback } from 'react';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5000';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:1965';
 
 interface ExtractedElement {
   id: string;
@@ -22,6 +22,13 @@ interface OutcomeBin {
 }
 
 export type ConformanceMode = 'bpmn' | 'declarative' | 'declarative-model';
+
+export interface WorkaroundEntry {
+  isWorkaround: boolean;
+  actorRoles: string[];
+  misfit: string;
+  goal: string;
+}
 
 interface DeviationSelection {
   column: string;   // exact matrix column name (e.g., "(Skip A)" or "Precedence_A_B")
@@ -79,6 +86,7 @@ export interface FilterResult {
   originalCount: number;
   filteredCount: number;
   excludedCount: number;
+  filteredEvents: number;
   excludedByStep: Record<string, string[]>;
 }
 
@@ -147,6 +155,18 @@ interface FileContextType {
   loggingErrorDeviations: string[];
   setLoggingErrorDeviations: React.Dispatch<React.SetStateAction<string[]>>;
 
+  // Deviations marked as model exceptions in Step 3 (excluded from causal analysis)
+  modelExceptionDeviations: string[];
+  setModelExceptionDeviations: React.Dispatch<React.SetStateAction<string[]>>;
+
+  // Issue grouping: maps deviation column → issue name (default = deviation label)
+  deviationIssueMap: Record<string, string>;
+  setDeviationIssueMap: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+
+  // Workaround analysis: maps issue name → workaround entry
+  workaroundMap: Record<string, WorkaroundEntry>;
+  setWorkaroundMap: React.Dispatch<React.SetStateAction<Record<string, WorkaroundEntry>>>;
+
   // Filter / recompute state
   filterSummary: FilterSummary;
   setFilterSummary: React.Dispatch<React.SetStateAction<FilterSummary>>;
@@ -185,6 +205,9 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
   const [amountConformanceData, setAmountConformanceData] = useState<any[]>([]);
   const [dimensionConfigs, setDimensionConfigs] = useState<Record<string, any>>({});
   const [loggingErrorDeviations, setLoggingErrorDeviations] = useState<string[]>([]);
+  const [modelExceptionDeviations, setModelExceptionDeviations] = useState<string[]>([]);
+  const [deviationIssueMap, setDeviationIssueMap] = useState<Record<string, string>>({});
+  const [workaroundMap, setWorkaroundMap] = useState<Record<string, WorkaroundEntry>>({});
   const [outcomeBins, setOutcomeBins] = useState<OutcomeBin[]>([]);
   const [desiredOutcomes, setDesiredOutcomes] = useState<string[]>([]);
   const [matching_mode, setmatching_mode] = useState<string>('');
@@ -216,6 +239,7 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
       originalCount: data.original_count ?? 0,
       filteredCount: data.filtered_count ?? 0,
       excludedCount: data.excluded_count ?? 0,
+      filteredEvents: data.filtered_events ?? 0,
       excludedByStep: data.excluded_by_step ?? {},
     };
     setFilterSummary(summary);
@@ -249,6 +273,9 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
     setAttributeConformance({});
     setDimensionConfigs({});
     setLoggingErrorDeviations([]);
+    setModelExceptionDeviations([]);
+    setDeviationIssueMap({});
+    setWorkaroundMap({});
     setFilterSummary(EMPTY_FILTER_SUMMARY);
     setFilterResult(null);
   };
@@ -274,6 +301,9 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
         selectedDimensions, setSelectedDimensions,
         dimensionConfigs, setDimensionConfigs,
         loggingErrorDeviations, setLoggingErrorDeviations,
+        modelExceptionDeviations, setModelExceptionDeviations,
+        deviationIssueMap, setDeviationIssueMap,
+        workaroundMap, setWorkaroundMap,
         filterSummary, setFilterSummary,
         filterResult, setFilterResult,
         applyAndRecompute,

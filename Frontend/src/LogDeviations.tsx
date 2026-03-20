@@ -30,12 +30,41 @@ import { useNavigate } from 'react-router-dom';
 import { useBottomNav } from './BottomNavContext';
 import { useFileContext } from './FileContext';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5000';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:1965';
+
+const UNIT_LABELS: Record<string, string> = { s: 'seconds', m: 'minutes', h: 'hours', d: 'days' };
+const formatTimeCondition = (tc: TimeCondition): string => {
+  const unit = UNIT_LABELS[tc.unit] ?? tc.unit;
+  const fmt = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (tc.min === tc.max) return `exactly ${fmt(tc.min)} ${unit}`;
+  if (tc.min === 0) return `within ${fmt(tc.max)} ${unit}`;
+  return `${fmt(tc.min)} – ${fmt(tc.max)} ${unit}`;
+};
+const formatSeconds = (s: number): string => {
+  if (s >= 86400) return `${(s / 86400).toFixed(1)} days`;
+  if (s >= 3600) return `${(s / 3600).toFixed(1)} hrs`;
+  if (s >= 60) return `${(s / 60).toFixed(1)} min`;
+  return `${s.toFixed(0)} s`;
+};
 
 interface Variant {
   sequence: string[];
   count: number;
   percentage: number;
+}
+
+interface TimeCondition {
+  min: number;
+  max: number;
+  unit: string;
+  raw?: string;
+}
+
+interface ViolationDiagnostics {
+  no_target_count: number;
+  target_condition_failed_count: number;
+  time_window_violated_count: number;
+  time_violation_details: { actual_seconds: number }[];
 }
 
 interface DeviationItem {
@@ -45,6 +74,13 @@ interface DeviationItem {
   affected_count: number;
   affected_percentage: number;
   top_variants: Variant[];
+  activation_condition?: string | null;
+  correlation_condition?: string | null;
+  time_condition?: TimeCondition | null;
+  total_activations?: number | null;
+  violation_diagnostics?: ViolationDiagnostics | null;
+  support?: number | null;
+  confidence?: number | null;
 }
 
 interface DeviationData {
@@ -66,10 +102,14 @@ const DeviationCard: React.FC<{
 }> = ({ item, action, onActionChange }) => {
   const [expanded, setExpanded] = useState(false);
   const chipColor = typeColor[item.type] ?? '#555';
+  const neverActivated = item.total_activations === 0;
 
   const borderColor =
     action === 'ignore' ? '#f44336' : action === 'remove' ? '#e65100' : 'divider';
   const borderWidth = action !== 'none' ? 2 : 1;
+
+  const diag = item.violation_diagnostics;
+  const diagTotal = diag ? diag.no_target_count + diag.target_condition_failed_count + diag.time_window_violated_count : 0;
 
   return (
     <Card
@@ -80,10 +120,11 @@ const DeviationCard: React.FC<{
         borderWidth,
         opacity: action !== 'none' ? 0.85 : 1,
         transition: 'border-color 0.15s, opacity 0.15s',
+        backgroundColor: neverActivated ? '#fafafa' : undefined,
       }}
     >
-      <Box display="flex" alignItems="center" px={2} py={1.5} gap={1} flexWrap="wrap">
-        {/* Label + type chip */}
+      <Box display="flex" alignItems="flex-start" px={2} py={1.5} gap={1} flexWrap="wrap">
+        {/* Label + conditions + stats */}
         <Box flex={1} minWidth={200}>
           <Box display="flex" alignItems="center" gap={1} flexWrap="wrap">
             <Typography
@@ -104,36 +145,114 @@ const DeviationCard: React.FC<{
               <Chip icon={<DeleteSweepIcon />} label="Remove Cases" size="small" color="warning" variant="outlined" />
             )}
           </Box>
+
+          {/* Activation / Target / Time condition chips */}
+          {(item.activation_condition || item.correlation_condition || item.time_condition) && (
+            <Box display="flex" flexWrap="wrap" gap={0.5} mt={0.5}>
+              {item.activation_condition && (
+                <Tooltip title={`Activation guard: ${item.activation_condition}`} arrow>
+                  <Chip
+                    label={`A: ${item.activation_condition.length > 40 ? item.activation_condition.slice(0, 40) + '…' : item.activation_condition}`}
+                    size="small" variant="outlined"
+                    sx={{ fontSize: 10, borderColor: '#f57c00', color: '#e65100', maxWidth: 320 }}
+                  />
+                </Tooltip>
+              )}
+              {item.correlation_condition && (
+                <Tooltip title={`Target/correlation guard: ${item.correlation_condition}`} arrow>
+                  <Chip
+                    label={`T: ${item.correlation_condition.length > 40 ? item.correlation_condition.slice(0, 40) + '…' : item.correlation_condition}`}
+                    size="small" variant="outlined"
+                    sx={{ fontSize: 10, borderColor: '#7b1fa2', color: '#6a1b9a', maxWidth: 320 }}
+                  />
+                </Tooltip>
+              )}
+              {item.time_condition && (
+                <Tooltip title={`Time window: ${item.time_condition.raw ?? ''}`} arrow>
+                  <Chip
+                    label={`⏱ ${formatTimeCondition(item.time_condition)}`}
+                    size="small" variant="outlined"
+                    sx={{ fontSize: 10, borderColor: '#0288d1', color: '#01579b', maxWidth: 260 }}
+                  />
+                </Tooltip>
+              )}
+            </Box>
+          )}
+
+          {/* Stats chips */}
+          <Box display="flex" flexWrap="wrap" gap={0.5} mt={0.5}>
+            <Chip label={`Violations: ${item.affected_count.toLocaleString('en-US')}`} size="small" color="error" variant="outlined" />
+            {item.total_activations != null && (
+              <Chip
+                label={`Activations: ${item.total_activations.toLocaleString('en-US')}`}
+                size="small" color={neverActivated ? 'default' : 'success'} variant="outlined"
+              />
+            )}
+            {item.support != null && (
+              <Chip label={`Support: ${(item.support * 100).toFixed(1)}%`} size="small" variant="outlined" />
+            )}
+            {item.confidence != null && (
+              <Chip label={`Confidence: ${(item.confidence * 100).toFixed(1)}%`} size="small" variant="outlined" />
+            )}
+          </Box>
+
+          {neverActivated && (
+            <Typography variant="caption" sx={{ color: '#9e9e9e', display: 'block', mt: 0.5 }}>
+              Never activated — constraint was not triggered in any trace. Violations are vacuous and can be disregarded.
+            </Typography>
+          )}
+
+          {/* Violation diagnostics */}
+          {diag && !neverActivated && diagTotal > 0 && (
+            <Box mt={0.75} p={0.75} sx={{ background: '#fff8e1', borderRadius: 1, border: '1px solid #ffe082' }}>
+              <Typography variant="caption" sx={{ fontWeight: 700, color: '#e65100', display: 'block', mb: 0.25 }}>
+                Violation causes ({diagTotal} activations diagnosed):
+              </Typography>
+              <Box display="flex" flexWrap="wrap" gap={0.5}>
+                {diag.no_target_count > 0 && (
+                  <Tooltip title="Target activity was not found in the required position" arrow>
+                    <Chip label={`No target B: ${diag.no_target_count}`} size="small"
+                      sx={{ fontSize: 10, background: '#fce4ec', color: '#c62828', border: '1px solid #ef9a9a' }} />
+                  </Tooltip>
+                )}
+                {diag.target_condition_failed_count > 0 && (
+                  <Tooltip title="Target B occurred but the T. correlation condition was not satisfied" arrow>
+                    <Chip label={`T. condition failed: ${diag.target_condition_failed_count}`} size="small"
+                      sx={{ fontSize: 10, background: '#ede7f6', color: '#4527a0', border: '1px solid #b39ddb' }} />
+                  </Tooltip>
+                )}
+                {diag.time_window_violated_count > 0 && (
+                  <Tooltip
+                    title={diag.time_violation_details?.length > 0
+                      ? `Avg actual time: ${formatSeconds(diag.time_violation_details.reduce((s, x) => s + x.actual_seconds, 0) / diag.time_violation_details.length)}`
+                      : 'Time window was exceeded'}
+                    arrow
+                  >
+                    <Chip
+                      label={`Time window exceeded: ${diag.time_window_violated_count}${item.time_condition ? ` (allowed: ${formatTimeCondition(item.time_condition)})` : ''}`}
+                      size="small"
+                      sx={{ fontSize: 10, background: '#e3f2fd', color: '#0d47a1', border: '1px solid #90caf9' }}
+                    />
+                  </Tooltip>
+                )}
+              </Box>
+            </Box>
+          )}
         </Box>
 
-        {/* Affected count + bar */}
-        <Box display="flex" alignItems="center" gap={2} ml="auto">
-          <Box textAlign="right">
-            <Typography variant="body2" fontWeight="bold">
-              {item.affected_count.toLocaleString('en-US')}
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              cases ({item.affected_percentage}%)
-            </Typography>
-          </Box>
-          <Box sx={{ width: 80, height: 6, backgroundColor: '#eee', borderRadius: 3, overflow: 'hidden' }}>
-            <Box
-              sx={{
-                height: '100%',
-                width: `${item.affected_percentage}%`,
-                backgroundColor: action !== 'none' ? '#bdbdbd' : chipColor,
-                borderRadius: 3,
-              }}
-            />
-          </Box>
-          <IconButton
-            size="small"
-            onClick={() => setExpanded((v) => !v)}
-            aria-label={expanded ? 'Collapse variants' : 'Expand variants'}
-          >
-            {expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
-          </IconButton>
-        </Box>
+        <IconButton
+          size="small"
+          onClick={() => setExpanded((v) => !v)}
+          aria-label={expanded ? 'Collapse variants' : 'Expand variants'}
+          sx={{ ml: 1, mt: 0.25 }}
+        >
+          {expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+        </IconButton>
+      </Box>
+
+      {/* Violation bar */}
+      <Box sx={{ height: 6, backgroundColor: '#eee' }}>
+        <Box sx={{ height: 6, width: `${item.affected_percentage}%`, backgroundColor: neverActivated ? '#ccc' : (action !== 'none' ? '#bdbdbd' : '#ed6c02') }} />
       </Box>
 
       {/* Action toggle */}
@@ -363,14 +482,30 @@ const LogDeviations: React.FC = () => {
             )}
           </Box>
 
-          {data.deviations.map((item) => (
-            <DeviationCard
-              key={item.column}
-              item={item}
-              action={deviationActions[item.column] ?? 'none'}
-              onActionChange={(a) => handleActionChange(item.column, a)}
-            />
-          ))}
+          {/* Group by constraint type */}
+          {(() => {
+            const grouped: Record<string, DeviationItem[]> = {};
+            data.deviations.forEach((d) => {
+              if (!grouped[d.type]) grouped[d.type] = [];
+              grouped[d.type].push(d);
+            });
+            return Object.entries(grouped).map(([type, items]) => (
+              <Card key={type} sx={{ mb: 2 }}>
+                <CardContent>
+                  <Typography variant="h6" gutterBottom>{type}</Typography>
+                  <Divider sx={{ mb: 1.5 }} />
+                  {items.map((item) => (
+                    <DeviationCard
+                      key={item.column}
+                      item={item}
+                      action={deviationActions[item.column] ?? 'none'}
+                      onActionChange={(a) => handleActionChange(item.column, a)}
+                    />
+                  ))}
+                </CardContent>
+              </Card>
+            ));
+          })()}
 
           {/* Apply & Recompute */}
           {removeCount > 0 && (
@@ -381,7 +516,7 @@ const LogDeviations: React.FC = () => {
                 </Typography>
                 <Typography variant="body2" color="text.secondary" gutterBottom>
                   {removeCount} deviation(s) are set to remove all affected cases. Click below to
-                  apply the filter and recompute alignments.
+                  apply the filter and recompute conformance results.
                 </Typography>
                 <Box display="flex" alignItems="center" gap={2} mt={1.5}>
                   <Button
@@ -392,11 +527,11 @@ const LogDeviations: React.FC = () => {
                     disabled={applying}
                     startIcon={applying ? <CircularProgress size={14} color="inherit" /> : <DeleteSweepIcon />}
                   >
-                    {applying ? 'Recomputing…' : 'Apply & Recompute Alignments'}
+                    {applying ? 'Recomputing…' : 'Apply & Recompute'}
                   </Button>
                   {applied && (
                     <Chip
-                      label="Alignments recomputed successfully"
+                      label="Recomputed successfully"
                       color="success"
                       size="small"
                       icon={<CheckCircleOutlineIcon />}
