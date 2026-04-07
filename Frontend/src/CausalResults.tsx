@@ -118,7 +118,7 @@ const CausalResults: React.FC = () => {
   const location = useLocation();
   const { setContinue } = useBottomNav();
 
-  const { selectedDeviations, resetAll } = useFileContext();
+  const { selectedDeviations, resetAll, workaroundMap } = useFileContext();
 
   const handleReset = () => {
     resetAll();
@@ -236,7 +236,8 @@ const CausalResults: React.FC = () => {
     });
   }, [dimensions]);
 
-  // default boundaries based on data distribution (keeps user edits)
+  // default boundaries: ±5% = neutral, ±25% = slightly, ±50% = moderate, beyond = very
+  // all relative to the maximum absolute ATE for the dimension (keeps user edits)
   useEffect(() => {
     if (!dimensions.length || !results.length) return;
 
@@ -256,17 +257,12 @@ const CausalResults: React.FC = () => {
 
       if (!values.length) return;
 
-      const realMin = Math.min(...values);
-      const realMax = Math.max(...values);
-      const padding = (realMax - realMin) * 0.2 || 1;
-      const lower = realMin - padding;
-      const upper = realMax + padding;
+      // scale relative to the largest observed effect, minimum 1 to avoid degenerate sliders
+      const maxAbs = Math.max(...values.map(Math.abs), 1);
 
-      const stepSize = (upper - lower) / levels.length;
-
-      updated[dim] = Array.from({ length: levels.length - 1 }, (_, i) => {
-        return lower + stepSize * (i + 1);
-      });
+      // 6 cut points for 7 levels: neutral = ±5%, slightly = ±25%, moderate = ±50%, very = beyond
+      const fractions = [-0.50, -0.25, -0.05, +0.05, +0.25, +0.50];
+      updated[dim] = fractions.map((f) => f * maxAbs);
     });
 
     if (Object.keys(updated).length) {
@@ -298,9 +294,9 @@ const CausalResults: React.FC = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     setContinue({
-      label: "Criticality Overview",
+      label: "Continue to Risks & Opportunities",
       onClick: () =>
-        navigate("/criticality-results", {
+        navigate("/risks-opportunities", {
           state: { results, criticalityMap: buildCriticalityMap() },
         }),
     });
@@ -444,6 +440,8 @@ const CausalResults: React.FC = () => {
                   if (!result) return <TableCell key={dev} />;
 
                   const bgColor = getCellColor(dim, result.ate, maxAbsEffect);
+                  const entry = workaroundMap[dev];
+                  const expectedDesc = entry?.isWorkaround && entry.goalDimensions?.[dim.toLowerCase()];
 
                   return (
                     <Tooltip
@@ -464,6 +462,32 @@ const CausalResults: React.FC = () => {
                             ({result.p_value !== undefined ? result.p_value.toFixed(3) : "-"})
                           </Typography>
                         </Typography>
+                        {expectedDesc && (
+                          <Tooltip
+                            title={`Expected by actor: "${expectedDesc}"`}
+                            arrow
+                            placement="bottom"
+                          >
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                display: 'inline-block',
+                                mt: 0.4,
+                                px: 0.6,
+                                py: 0.1,
+                                borderRadius: 0.5,
+                                fontSize: '0.55rem',
+                                fontWeight: 700,
+                                letterSpacing: 0.3,
+                                background: 'rgba(21,101,192,0.12)',
+                                color: '#1565c0',
+                                cursor: 'help',
+                              }}
+                            >
+                              ★ expected
+                            </Typography>
+                          </Tooltip>
+                        )}
                       </TableCell>
                     </Tooltip>
                   );

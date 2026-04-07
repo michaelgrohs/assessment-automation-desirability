@@ -1751,8 +1751,19 @@ def configure_dimensions():
                 if col not in df.columns:
                     raise ValueError(f"Column '{col}' not found")
                 if operator == "equals":
+                    # coerce to numeric for numeric columns so "2" matches int 2
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        try:
+                            return df[col] == float(value)
+                        except (ValueError, TypeError):
+                            pass
                     return df[col] == value
                 elif operator == "not_equals":
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        try:
+                            return df[col] != float(value)
+                        except (ValueError, TypeError):
+                            pass
                     return df[col] != value
                 elif operator == "contains":
                     return df[col].apply(lambda x: any(str(value) in str(v) for v in x) if isinstance(x, list) else str(value) in str(x))
@@ -1774,11 +1785,14 @@ def configure_dimensions():
             try:
                 combined = None
                 for cond in conditions:
-                    cond_col = cond.get("column", "")
-                    cond_op  = cond.get("operator", "")
-                    cond_val = cond.get("value", "")
+                    cond_col  = cond.get("column", "")
+                    cond_op   = cond.get("operator", "")
+                    cond_val  = cond.get("value", "")
                     connector = cond.get("connector", "AND")
+                    negate    = cond.get("negate", False)
                     cond_result = _eval_cond(cond_col, cond_op, cond_val)
+                    if negate:
+                        cond_result = ~cond_result
                     if combined is None:
                         combined = cond_result
                     elif connector == "OR":
@@ -2749,6 +2763,16 @@ def api_ollama_models():
         return jsonify({"models": [], "online": False, "error": str(e)})
 
 
+@app.route('/api/ollama/start', methods=['POST'])
+def api_ollama_start():
+    import subprocess
+    try:
+        subprocess.Popen(['ollama', 'serve'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return jsonify({'started': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/ollama/pull', methods=['POST'])
 def api_ollama_pull():
     import urllib.request
@@ -2774,11 +2798,13 @@ def api_llm_suggestion():
     import urllib.request
     data = request.get_json(force=True)
     deviation = data.get('deviation', '')
-    direction = data.get('direction', 'neutral')  # 'positive', 'negative', 'neutral'
-    causal_effects = data.get('causal_effects', [])  # [{dimension, ate, criticality}]
+    direction = data.get('direction', 'neutral')
+    causal_effects = data.get('causal_effects', [])
     top_rule = data.get('top_rule', None)
     model = data.get('model', 'llama3.2')
     all_activities = data.get('all_activities', [])
+    workaround = data.get('workaround', None)        # {actor_roles, misfit, goal, intended_dimensions}
+    risks_opportunities = data.get('risks_opportunities', [])  # [{type, horizon, description}]
 
     effects_lines = "\n".join(
         f"  - {e['dimension']}: CATE={e['ate']:.3f} ({e['criticality']})"
@@ -2803,15 +2829,43 @@ All activity names observed in the process log:
 Step 1 — Infer the process domain: Based on the activity names above, identify what kind of real-world process this likely is (e.g. healthcare, logistics, finance, IT service management, manufacturing). Look at the nouns (objects) and verbs (actions) in the activity names to reason about the domain and the process flow.
 """
 
+    workaround_block = ""
+    if workaround:
+        roles_str = ", ".join(workaround.get('actor_roles', [])) or "unspecified"
+        misfit = workaround.get('misfit', '').strip()
+        goal = workaround.get('goal', '').strip()
+        intended = workaround.get('intended_dimensions', [])
+        intended_lines = "\n".join(
+            f"    • {d['dimension']}: {d['description']}" for d in intended if d.get('description')
+        ) or "    (none specified)"
+        workaround_block = f"""
+Participant perspective (workaround analysis):
+  - This deviation is a workaround performed by: {roles_str}
+  - Stated misfit / reason: {misfit or '(not provided)'}
+  - Stated goal: {goal or '(not provided)'}
+  - Intended impact on dimensions (as reported by participants):
+{intended_lines}
+"""
+
+    risks_block = ""
+    if risks_opportunities:
+        risks_lines = "\n".join(
+            f"  - [{e['type'].upper()} / {e['horizon']}-term] {e['description']}"
+            for e in risks_opportunities if e.get('description')
+        )
+        if risks_lines:
+            risks_block = f"\nIdentified risks and opportunities:\n{risks_lines}\n"
+
     prompt = f"""You are a process improvement consultant analyzing a business process.
 {activities_block}
 A process deviation called "{deviation}" has been detected.
 Overall impact direction: {direction}.
-Causal effects on process dimensions:
-{effects_lines}{rule_line}
 
+Measured causal effects on process dimensions (from data):
+{effects_lines}{rule_line}
+{workaround_block}{risks_block}
 Step 2 — Give 3 concise, actionable recommendations to {action}.
-Ground your recommendations in the inferred process domain and the specific activities involved. Be specific and practical. Use bullet points. Do not repeat the input data."""
+Ground your recommendations in the inferred process domain, the specific activities involved, the participant perspective, and the identified risks/opportunities. Be specific and practical. Use bullet points. Do not repeat the input data."""
 
     payload = json.dumps({
         "model": model,
@@ -2884,6 +2938,34 @@ def get_workaround_resources():
             resources_by_issue[issue] = sorted(resources_by_deviation.get(issue, []))
 
     return jsonify({'resources_by_issue': resources_by_issue})
+
+
+@app.route('/api/workaround-patterns', methods=['GET'])
+def get_workaround_patterns_endpoint():
+    """Return workaround pattern hints for each issue (BPMN / trace-alignment mode only).
+
+    Analyzes inserted and skipped activities per issue and returns per-issue pattern
+    evidence: recurrence, direct_repetition, mutually_exclusive, wrong_order,
+    missing_occurrence, unusual_neighbor — each with a support count and percentage.
+    """
+    mode = last_uploaded_data.get('mode', 'bpmn')
+    log = last_uploaded_data.get('xes_log')
+    aligned_traces = last_uploaded_data.get('alignments')
+    stored_issue_map = last_uploaded_data.get('stored_issue_map')
+
+    if mode != 'bpmn' or log is None or aligned_traces is None or stored_issue_map is None:
+        return jsonify({'patterns': {}})
+
+    try:
+        from process_mining.pattern_workarounds import get_workaround_patterns, get_merge_suggestions
+        bpmn_path = last_uploaded_data.get('bpmn_path')
+        patterns = get_workaround_patterns(log, aligned_traces, stored_issue_map, bpmn_path)
+        merge_suggestions = get_merge_suggestions(aligned_traces, stored_issue_map)
+        return jsonify({'patterns': patterns, 'merge_suggestions': merge_suggestions})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'patterns': {}, 'merge_suggestions': [], 'error': str(e)})
 
 
 if __name__ == '__main__':

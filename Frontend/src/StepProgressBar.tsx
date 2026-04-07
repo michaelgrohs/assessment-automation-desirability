@@ -11,10 +11,10 @@ const PHASE1_STEPS = [
   { label: '3. Model Exceptions', routes: ['/deviation-selection'] },
 ];
 
-const PHASE2_STEPS = [
-  { label: '4. Evaluate Impact', routes: ['/select-dimensions', '/causal-results', '/overview'] },
-  { label: '5. Evaluate Reaction', routes: ['/criticality-results', '/recommendations'] },
-];
+const STEP4_ROUTES = ['/select-dimensions', '/causal-results', '/risks-opportunities', '/overview'];
+const STEP4_1_ROUTES = ['/select-dimensions', '/causal-results', '/overview'];
+const STEP4_2_ROUTES = ['/risks-opportunities'];
+const STEP5_ROUTES = ['/recommendations'];
 
 const AGGREGATION_ROUTES = ['/issue-grouping', '/workaround-analysis'];
 
@@ -69,30 +69,33 @@ const StepProgressBar: React.FC = () => {
   const { pathname } = useLocation();
 
   const isAggregation = AGGREGATION_ROUTES.includes(pathname);
+  const inStep4 = STEP4_ROUTES.includes(pathname);
+  const inStep5 = STEP5_ROUTES.includes(pathname);
+  // Unfold step 4 into 4.1/4.2 once the user reaches step 4 or beyond
+  const step4Expanded = inStep4 || inStep5;
+
+  const allPhase2Routes = [...STEP4_ROUTES, ...STEP5_ROUTES];
 
   const getPhase1State = (routes: string[]): 'done' | 'active' | 'pending' => {
     if (routes.includes(pathname)) return 'active';
     if (isAggregation) return 'done';
-    const phase2Active = PHASE2_STEPS.some((s) => s.routes.includes(pathname));
-    if (phase2Active) return 'done';
+    if (allPhase2Routes.includes(pathname)) return 'done';
     const thisIdx = PHASE1_STEPS.findIndex((s) => s.routes.includes(pathname));
     const myIdx = PHASE1_STEPS.findIndex((s) => s.routes.some((r) => routes.includes(r)));
     if (thisIdx === -1) return 'pending';
     return myIdx < thisIdx ? 'done' : 'pending';
   };
 
-  const getPhase2State = (routes: string[]): 'done' | 'active' | 'pending' => {
-    if (routes.includes(pathname)) return 'active';
-    const myIdx = PHASE2_STEPS.findIndex((s) => s.routes.some((r) => routes.includes(r)));
-    const thisIdx = PHASE2_STEPS.findIndex((s) => s.routes.includes(pathname));
-    if (thisIdx === -1) return 'pending';
-    return myIdx < thisIdx ? 'done' : 'pending';
-  };
+  // Step-4 state helpers
+  const step4CollapseState: 'done' | 'active' | 'pending' = inStep4 ? 'active' : inStep5 ? 'done' : 'pending';
+  const step41State: 'done' | 'active' | 'pending' = STEP4_1_ROUTES.includes(pathname) ? 'active' : (STEP4_2_ROUTES.includes(pathname) || inStep5) ? 'done' : 'pending';
+  const step42State: 'done' | 'active' | 'pending' = STEP4_2_ROUTES.includes(pathname) ? 'active' : inStep5 ? 'done' : 'pending';
+  const step5State: 'done' | 'active' | 'pending' = STEP5_ROUTES.includes(pathname) ? 'active' : 'pending';
 
-  const phase1Done = isAggregation || PHASE2_STEPS.some((s) => s.routes.includes(pathname));
+  const phase1Done = isAggregation || allPhase2Routes.includes(pathname);
   const aggregationState: 'done' | 'active' | 'pending' = isAggregation
     ? 'active'
-    : PHASE2_STEPS.some((s) => s.routes.includes(pathname))
+    : allPhase2Routes.includes(pathname)
     ? 'done'
     : 'pending';
 
@@ -127,14 +130,14 @@ const StepProgressBar: React.FC = () => {
         <Box sx={{ width: 80 }} />
 
         {/* Phase 2 label */}
-        <Box sx={{ flex: 3 * PHASE2_STEPS.length, display: 'flex', justifyContent: 'center' }}>
+        <Box sx={{ flex: step4Expanded ? 9 : 6, display: 'flex', justifyContent: 'center' }}>
           <Typography
             variant="caption"
             sx={{
               fontWeight: 600,
               fontSize: '0.6rem',
               letterSpacing: 0.5,
-              color: PHASE2_STEPS.some((s) => s.routes.includes(pathname)) ? '#1976d2' : '#9e9e9e',
+              color: allPhase2Routes.includes(pathname) ? '#1976d2' : '#9e9e9e',
               textTransform: 'uppercase',
             }}
           >
@@ -195,15 +198,30 @@ const StepProgressBar: React.FC = () => {
         {/* Connector out of aggregation */}
         <Connector done={aggregationState === 'done'} />
 
-        {/* Phase 2 steps */}
-        {PHASE2_STEPS.map((step, i) => (
-          <React.Fragment key={step.label}>
-            <StepNode label={step.label} state={getPhase2State(step.routes)} />
-            {i < PHASE2_STEPS.length - 1 && (
-              <Connector done={getPhase2State(PHASE2_STEPS[i + 1].routes) !== 'pending' || getPhase2State(step.routes) === 'done'} />
-            )}
-          </React.Fragment>
-        ))}
+        {/* Phase 2 steps — step 4 expands to 4.1/4.2 once reached */}
+        {step4Expanded ? (
+          <>
+            {/* Step 4 group */}
+            <Box display="flex" flexDirection="column" alignItems="center" sx={{ position: 'relative' }}>
+              <Typography variant="caption" sx={{ fontSize: '0.55rem', fontWeight: 700, color: inStep4 ? '#1976d2' : inStep5 ? '#2e7d32' : '#9e9e9e', letterSpacing: 0.3, mb: 0.25, textTransform: 'uppercase' }}>
+                Step 4
+              </Typography>
+              <Box display="flex" alignItems="center">
+                <StepNode label="4.1 Direct Impact" state={step41State} />
+                <Connector done={step42State !== 'pending' || step41State === 'done'} />
+                <StepNode label="4.2 Risks & Opps" state={step42State} />
+              </Box>
+            </Box>
+            <Connector done={step5State !== 'pending' || step42State === 'done'} />
+            <StepNode label="5. Recommendations" state={step5State} />
+          </>
+        ) : (
+          <>
+            <StepNode label="4. Evaluate Impact" state={step4CollapseState} />
+            <Connector done={step5State !== 'pending'} />
+            <StepNode label="5. Recommendations" state={step5State} />
+          </>
+        )}
       </Box>
     </Box>
   );

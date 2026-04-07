@@ -28,6 +28,24 @@ export interface WorkaroundEntry {
   actorRoles: string[];
   misfit: string;
   goal: string;
+  /** Maps each dimension name (time/costs/quality/outcome/compliance) the user expects
+   *  to be affected → a short description of the intended effect. */
+  goalDimensions: Record<string, string>;
+  patternType?: string;  // selected workaround pattern type (e.g. 'wrong_order', 'recurrence', …)
+}
+
+export interface RiskOpportunity {
+  id: string;
+  type: 'risk' | 'opportunity';
+  horizon: 'short' | 'mid' | 'long';
+  description: string;
+}
+
+export interface IssueCausalLink {
+  id: string;
+  from: string;
+  to: string;
+  description: string;
 }
 
 interface DeviationSelection {
@@ -167,6 +185,14 @@ interface FileContextType {
   workaroundMap: Record<string, WorkaroundEntry>;
   setWorkaroundMap: React.Dispatch<React.SetStateAction<Record<string, WorkaroundEntry>>>;
 
+  // Risks & opportunities: maps issue name → list of entries
+  issueRisksOpportunities: Record<string, RiskOpportunity[]>;
+  setIssueRisksOpportunities: React.Dispatch<React.SetStateAction<Record<string, RiskOpportunity[]>>>;
+
+  // Issue causal links: directed relationships between issues
+  issueCausalLinks: IssueCausalLink[];
+  setIssueCausalLinks: React.Dispatch<React.SetStateAction<IssueCausalLink[]>>;
+
   // Filter / recompute state
   filterSummary: FilterSummary;
   setFilterSummary: React.Dispatch<React.SetStateAction<FilterSummary>>;
@@ -208,6 +234,8 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
   const [modelExceptionDeviations, setModelExceptionDeviations] = useState<string[]>([]);
   const [deviationIssueMap, setDeviationIssueMap] = useState<Record<string, string>>({});
   const [workaroundMap, setWorkaroundMap] = useState<Record<string, WorkaroundEntry>>({});
+  const [issueRisksOpportunities, setIssueRisksOpportunities] = useState<Record<string, RiskOpportunity[]>>({});
+  const [issueCausalLinks, setIssueCausalLinks] = useState<IssueCausalLink[]>([]);
   const [outcomeBins, setOutcomeBins] = useState<OutcomeBin[]>([]);
   const [desiredOutcomes, setDesiredOutcomes] = useState<string[]>([]);
   const [matching_mode, setmatching_mode] = useState<string>('');
@@ -276,6 +304,8 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
     setModelExceptionDeviations([]);
     setDeviationIssueMap({});
     setWorkaroundMap({});
+    setIssueRisksOpportunities({});
+    setIssueCausalLinks([]);
     setFilterSummary(EMPTY_FILTER_SUMMARY);
     setFilterResult(null);
   };
@@ -304,6 +334,8 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
         modelExceptionDeviations, setModelExceptionDeviations,
         deviationIssueMap, setDeviationIssueMap,
         workaroundMap, setWorkaroundMap,
+        issueRisksOpportunities, setIssueRisksOpportunities,
+        issueCausalLinks, setIssueCausalLinks,
         filterSummary, setFilterSummary,
         filterResult, setFilterResult,
         applyAndRecompute,

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import {
   Box,
   Typography,
@@ -61,6 +61,14 @@ const dimensionTooltips: Record<Dimension, string> = {
   compliance: "Compliance: a binary indicator of whether a case adheres to regulatory or policy rules (1 = compliant, 0 = non-compliant). A higher value is better.",
 };
 
+const dimensionDescriptions: Record<Dimension, string> = {
+  time: "Measures how long a case takes. Lower values are better. Map to a duration column or convert to a convenient unit via formula.",
+  costs: "Measures monetary expenditure. Lower values are better. Combine cost-related attributes via a formula (e.g., Amount × Quantity).",
+  quality: "Binary indicator of whether quality standards were met (1 = good, 0 = not). Use a rule on a rework count, error flag, or activity presence.",
+  outcome: "Binary indicator of the desired case result (1 = success, 0 = failure). Use a rule on a final activity or result attribute.",
+  compliance: "Binary indicator of regulatory or policy adherence (1 = compliant, 0 = not). Encode as the non-existence of a forbidden activity or condition.",
+};
+
 const computationTypeTooltips: Record<ComputationType, string> = {
   existing: "Use Existing Column: directly maps this dimension to a numeric column already present in the impact matrix. Select the column from the dropdown.",
   formula: "Formula from Column: compute a new value using a pandas-style expression over existing columns (e.g., 'duration / 3600' to convert seconds to hours). Click column name chips to insert them into the expression.",
@@ -79,6 +87,7 @@ const SelectDimensions: React.FC = () => {
     setDimensionConfigs: setConfigs,
     conformanceMode,
     deviationIssueMap,
+    workaroundMap,
   } = useFileContext();
 
   // After issue grouping, deviation columns are merged into issues — hide the dev section
@@ -279,6 +288,13 @@ const SelectDimensions: React.FC = () => {
   };
 
   const isColumnBinary = (col: string): boolean => {
+    // Count/amount columns should never be treated as binary even if only 0/1 observed
+    const colLower = col.toLowerCase();
+    if (
+      colLower.includes('count') || colLower.includes('rework') || colLower.includes('redo') ||
+      colLower.includes('total') || colLower.includes('_sum') || colLower.startsWith('num_') ||
+      colLower.startsWith('n_') || colLower.includes('amount') || colLower.includes('frequency')
+    ) return false;
     const vals = matrixRows
       .map((row) => row[col])
       .filter((v) => v !== null && v !== undefined && !Array.isArray(v));
@@ -308,6 +324,98 @@ const SelectDimensions: React.FC = () => {
     if (nums.length === 0) return [0, 100];
     return [Math.min(...nums), Math.max(...nums)];
   };
+
+  // ── Dimension suggestions (data-driven) ──────────────────────────────────────
+  interface DimSuggestion {
+    label: string;
+    note: string;
+    config: { computationType: ComputationType; config: any };
+  }
+
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const dimensionSuggestions: Record<Dimension, DimSuggestion[]> = useMemo(() => {
+    const durationCol = matrixColumns.find(c =>
+      c === 'trace_duration_seconds' || c.toLowerCase().includes('trace_duration')
+    );
+    const reworkCols = matrixColumns.filter(c =>
+      c.toLowerCase().includes('rework') || c.toLowerCase().includes('redo')
+    );
+    const activitiesCol = matrixColumns.find(c => matrixRows.some((r: any) => Array.isArray(r[c])));
+
+    return {
+      time: [
+        ...(durationCol ? [
+          {
+            label: `Use "${durationCol}" directly (seconds)`,
+            note: 'Maps time to the duration column as-is. Lower = faster.',
+            config: { computationType: 'existing' as ComputationType, config: { column: durationCol } },
+          },
+          {
+            label: `"${durationCol}" ÷ 3600 → hours`,
+            note: 'Formula: converts seconds to hours for a more readable scale.',
+            config: { computationType: 'formula' as ComputationType, config: { expression: `${durationCol}/3600` } },
+          },
+        ] : []),
+      ],
+      costs: [],
+      quality: [
+        ...reworkCols.map(col => {
+          const [, rMax] = getColumnRange(col);
+          return {
+            label: `${col} < 2  (low rework = good quality)`,
+            note: `Quality = 1 if ${col} < 2, else 0. Column range: 0–${rMax.toLocaleString('en-US', { maximumFractionDigits: 1 })}.`,
+            config: { computationType: 'rule' as ComputationType, config: { conditions: [{ column: col, operator: 'less', value: '2' }] } },
+          };
+        }),
+        ...(activitiesCol ? [{
+          label: 'Specific activity occurred → quality met',
+          note: 'Quality = 1 if the activity sequence contains a chosen activity. Fill in the activity name below.',
+          config: { computationType: 'rule' as ComputationType, config: { conditions: [{ column: activitiesCol, operator: 'contains', value: '' }] } },
+        }] : []),
+      ],
+      outcome: [
+        ...(activitiesCol ? [{
+          label: 'Desired activity occurred in trace',
+          note: 'Outcome = 1 if the activity sequence contains a chosen activity. Fill in the activity name below.',
+          config: { computationType: 'rule' as ComputationType, config: { conditions: [{ column: activitiesCol, operator: 'contains', value: '' }] } },
+        }] : []),
+      ],
+      compliance: [
+        {
+          label: 'Forbidden activity absent  (choose column)',
+          note: 'Compliance = 1 if a problematic activity did NOT occur. Select the column below after applying.',
+          config: { computationType: 'rule' as ComputationType, config: { conditions: [{ column: '', operator: 'equals', value: '0' }] } },
+        },
+      ],
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matrixColumns, matrixRows]);
+
+  // ── Workaround dimension recommendations ──────────────────────────────────────
+  // Dimensions that any workaround issue has flagged as intended impact
+  const workaroundDimsUsed = useMemo(() => {
+    const computable = new Set(['time', 'costs', 'quality', 'outcome', 'compliance']);
+    const used = new Set<string>();
+    Object.values(workaroundMap).forEach(entry => {
+      if (!entry.isWorkaround) return;
+      Object.keys(entry.goalDimensions ?? {}).forEach(d => {
+        if (computable.has(d)) used.add(d);
+      });
+    });
+    return used;
+  }, [workaroundMap]);
+
+  // Computable dims marked in workarounds but not yet selected here
+  const workaroundDimsNotSelected = useMemo(
+    () => Array.from(workaroundDimsUsed).filter(d => !selectedDimensions.includes(d)),
+    [workaroundDimsUsed, selectedDimensions]
+  );
+
+  // Whether any workaround marked flexibility
+  const flexibilityMarked = useMemo(
+    () => Object.values(workaroundMap).some(e => e.isWorkaround && 'flexibility' in (e.goalDimensions ?? {})),
+    [workaroundMap]
+  );
 
   const ruleColumns = matrixColumns.filter((col) => col !== "trace_id");
 
@@ -396,6 +504,29 @@ const SelectDimensions: React.FC = () => {
         </Tooltip>
       </Box>
 
+      {/* ── Workaround dimension recommendation banner ── */}
+      {(workaroundDimsNotSelected.length > 0 || flexibilityMarked) && (
+        <Alert
+          severity="info"
+          sx={{ mb: 2 }}
+        >
+          <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+            Dimensions flagged in Workaround Analysis
+          </Typography>
+          {workaroundDimsNotSelected.length > 0 && (
+            <Typography variant="body2" sx={{ mb: 0.5 }}>
+              The following dimension{workaroundDimsNotSelected.length > 1 ? 's were' : ' was'} marked as intended impact by at least one workaround but {workaroundDimsNotSelected.length > 1 ? 'are' : 'is'} not yet configured here. It is recommended to define {workaroundDimsNotSelected.length > 1 ? 'them' : 'it'} so the stated intent can be compared to the measured causal effect:{' '}
+              <strong>{workaroundDimsNotSelected.join(', ')}</strong>.
+            </Typography>
+          )}
+          {flexibilityMarked && (
+            <Typography variant="body2">
+              <strong>Flexibility</strong> was marked in at least one workaround. It cannot be computed in the causal analysis but will be retained as an informative dimension in the workaround description.
+            </Typography>
+          )}
+        </Alert>
+      )}
+
       {availableDimensions.map(dim => (
         <Tooltip key={dim} title={dimensionTooltips[dim]} arrow placement="right">
           <FormControlLabel
@@ -419,6 +550,46 @@ const SelectDimensions: React.FC = () => {
             <Typography variant="h6">
               Configure: {dim}
             </Typography>
+
+            {/* ── Description + Quick-apply suggestions ── */}
+            {(() => {
+              const desc = dimensionDescriptions[dim as Dimension];
+              const suggestions = dimensionSuggestions[dim as Dimension] || [];
+              return (
+                <Box sx={{ mt: 1.5, mb: 0.5, p: 1.25, backgroundColor: '#f0f4ff', borderRadius: 1, border: '1px solid #c5d0f0' }}>
+                  <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: suggestions.length ? 1 : 0 }}>
+                    {desc}
+                  </Typography>
+                  {suggestions.length > 0 && (
+                    <>
+                      <Typography variant="caption" sx={{ display: 'block', color: '#1a237e', fontWeight: 600, mb: 0.5 }}>
+                        Quick apply:
+                      </Typography>
+                      {suggestions.map((s, i) => (
+                        <Box key={i} display="flex" alignItems="flex-start" gap={1} sx={{ mb: 0.75 }}>
+                          <Box flex={1}>
+                            <Typography variant="caption" sx={{ color: 'text.primary', fontWeight: 500, display: 'block' }}>
+                              {s.label}
+                            </Typography>
+                            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
+                              {s.note}
+                            </Typography>
+                          </Box>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            sx={{ py: 0.25, fontSize: '0.7rem', flexShrink: 0, alignSelf: 'center' }}
+                            onClick={() => updateConfig(dim, s.config)}
+                          >
+                            Apply
+                          </Button>
+                        </Box>
+                      ))}
+                    </>
+                  )}
+                </Box>
+              );
+            })()}
 
             <FormControl sx={{ mt: 2 }}>
               <FormLabel>Computation Type</FormLabel>
@@ -613,16 +784,18 @@ const SelectDimensions: React.FC = () => {
                 }
                 if (isColumnNumerical(cond.column)) {
                   const [rMin, rMax] = getColumnRange(cond.column);
-                  const step = rMin === rMax ? 1 : (rMax - rMin) / 1000;
                   const rawVal = parseFloat(cond.value);
                   const sliderVal = isNaN(rawVal) ? rMin : rawVal;
+                  // Extend max to fit current value (e.g. quick-apply may set value=2 when observed max=1)
+                  const sliderMax = isNaN(rawVal) ? rMax : Math.max(rMax, rawVal * 1.5);
+                  const step = rMin === sliderMax ? 1 : (sliderMax - rMin) / 1000;
                   return (
                     <Box sx={{ mt: 1 }}>
                       <Typography variant="caption" color="text.secondary">Value</Typography>
                       <Slider
                         value={sliderVal}
                         min={rMin}
-                        max={rMax}
+                        max={sliderMax}
                         step={step}
                         onChange={(_, v) => updateCondition(idx, { value: String(v) })}
                         valueLabelDisplay="auto"

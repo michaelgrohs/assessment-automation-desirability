@@ -417,6 +417,7 @@ const DeviationSelection: React.FC = () => {
   const [applying, setApplying] = useState(false);
   const [applied, setApplied] = useState(false);
   const [showAllVariants, setShowAllVariants] = useState(false);
+  const [autoExcluded, setAutoExcluded] = useState<string[]>([]);
   const VARIANTS_PREVIEW = 5;
 
   const isDeclarative = conformanceMode === 'declarative' || conformanceMode === 'declarative-model';
@@ -440,6 +441,22 @@ const DeviationSelection: React.FC = () => {
       .then((d) => setModelContent(d))
       .catch((err) => console.error('Failed to load model content:', err));
   }, []);
+
+  // Auto-exclude deviations with fewer than 10 affected cases
+  useEffect(() => {
+    if (!data) return;
+    const lowCount = data.deviations
+      .filter((d) => d.affected_count < 10 && !loggingErrorDeviations.includes(d.column))
+      .map((d) => d.column);
+    if (lowCount.length === 0) return;
+    setModelExceptionDeviations((prev) => {
+      const toAdd = lowCount.filter((c) => !prev.includes(c));
+      if (toAdd.length === 0) return prev;
+      setAutoExcluded(toAdd);
+      return [...prev, ...toAdd];
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
 
   // Restore removed sequences from context on mount
   useEffect(() => {
@@ -574,6 +591,13 @@ const DeviationSelection: React.FC = () => {
         {total_traces.toLocaleString('en-US')} total cases ·
         All deviations not marked as model exceptions will proceed to analysis.
       </Typography>
+
+      {/* Auto-exclusion banner */}
+      {autoExcluded.length > 0 && (
+        <Alert severity="info" sx={{ mb: 2, mt: 1 }}>
+          <strong>{autoExcluded.length} deviation(s) auto-excluded</strong>: deviations occurring in fewer than 10 cases were automatically marked as model exceptions since they lack statistical power for causal analysis. You can unmark them below if needed.
+        </Alert>
+      )}
 
       {/* Status chips */}
       {(loggingErrorDeviations.length > 0 || modelExceptionDeviations.length > 0) && (

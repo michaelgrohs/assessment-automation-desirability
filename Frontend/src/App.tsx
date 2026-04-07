@@ -14,6 +14,7 @@ import IssueGrouping from "./IssueGrouping";
 import WorkaroundAnalysis from "./WorkaroundAnalysis";
 import CausalResults from "./CausalResults";
 import CriticalityResults from "./CriticalityResults";
+import RisksOpportunities from "./RisksOpportunities";
 import Recommendations from "./Recommendations";
 import ViolationGuidelines from "./ViolationGuidelines";
 import ActivityStats from "./ActivityStats";
@@ -39,6 +40,7 @@ const App: React.FC = () => {
             <Route path="/select-dimensions" element={<SelectDimensions />} />
             <Route path="/causal-results" element={<CausalResults />} />
             <Route path="/criticality-results" element={<CriticalityResults />} />
+            <Route path="/risks-opportunities" element={<RisksOpportunities />} />
             <Route path="/recommendations" element={<Recommendations />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
