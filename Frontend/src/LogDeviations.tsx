@@ -336,6 +336,7 @@ const DeviationCard: React.FC<{
   );
 };
 
+
 const LogDeviations: React.FC = () => {
   const navigate = useNavigate();
   const { setContinue } = useBottomNav();
@@ -351,6 +352,7 @@ const LogDeviations: React.FC = () => {
 
   const [applying, setApplying] = useState(false);
   const [applied, setApplied] = useState(false);
+  const [autoPreselected, setAutoPreselected] = useState<string[]>([]);
 
   useEffect(() => {
     setContinue({ label: 'Continue', onClick: () => navigate('/model-check') });
@@ -368,12 +370,31 @@ const LogDeviations: React.FC = () => {
   useEffect(() => {
     if (!data) return;
     const initial: Record<string, DeviationAction> = {};
+    const autoIgnore: string[] = [];
+
     data.deviations.forEach((d) => {
-      if (loggingErrorDeviations.includes(d.column)) initial[d.column] = 'ignore';
-      else if (filterSummary.step1b_remove_columns.includes(d.column)) initial[d.column] = 'remove';
-      else initial[d.column] = 'none';
+      if (loggingErrorDeviations.includes(d.column)) {
+        initial[d.column] = 'ignore';
+      } else if (filterSummary.step1b_remove_columns.includes(d.column)) {
+        initial[d.column] = 'remove';
+      } else if (d.affected_percentage < 1) {
+        // Auto-mark deviations affecting <1% of cases as logging errors
+        initial[d.column] = 'ignore';
+        autoIgnore.push(d.column);
+      } else {
+        initial[d.column] = 'none';
+      }
     });
+
     setDeviationActions(initial);
+
+    if (autoIgnore.length > 0) {
+      setAutoPreselected(autoIgnore);
+      setLoggingErrorDeviations((prev) => {
+        const toAdd = autoIgnore.filter((c) => !prev.includes(c));
+        return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
@@ -444,6 +465,16 @@ const LogDeviations: React.FC = () => {
         "Remove All Cases" filters out every case that contains this deviation and triggers
         alignment recomputation.
       </Typography>
+
+      {autoPreselected.length > 0 && (
+        <Alert severity="info" sx={{ mt: 1.5, mb: 1 }}>
+          <strong>{autoPreselected.length} deviation(s) automatically pre-selected as Logging Errors</strong>:
+          deviations occurring in fewer than 1% of cases have been pre-marked as logging errors.
+          It is recommended to focus on more frequent deviations, as rare ones are unlikely to reflect
+          genuine process behaviour and more likely indicate recording artefacts. You can change any
+          pre-selection below.
+        </Alert>
+      )}
 
       {data.deviations.length === 0 && (
         <Alert severity="info" sx={{ mt: 2 }}>No deviations found in the deviation matrix.</Alert>
@@ -550,6 +581,7 @@ const LogDeviations: React.FC = () => {
           )}
         </>
       )}
+
     </Box>
   );
 };

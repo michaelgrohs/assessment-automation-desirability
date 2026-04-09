@@ -16,6 +16,7 @@ import {
   Button,
   Tooltip,
   IconButton,
+  Chip,
 } from "@mui/material";
 import InfoIcon from "@mui/icons-material/Info";
 
@@ -207,6 +208,49 @@ const CausalResults: React.FC = () => {
     fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Activity duration contribution (only when time dimension is selected) ──
+  const hasTimeDimension = selectedDimensions
+    .map((d: string) => d.toLowerCase())
+    .includes('time');
+
+  interface ActivityDurationRow {
+    activity: string;
+    with_deviation: number | null;
+    without_deviation: number | null;
+    difference: number | null;
+  }
+
+  const [durationContributions, setDurationContributions] = useState<
+    Record<string, ActivityDurationRow[]>
+  >({});
+  const [durationLoading, setDurationLoading] = useState(false);
+
+  useEffect(() => {
+    if (!hasTimeDimension || loading || deviations.length === 0) return;
+    setDurationLoading(true);
+    fetch(`${API_URL}/api/activity-duration-contribution`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviations: selectedDeviations.map((d: any) => d.column) }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        setDurationContributions(data.contributions || {});
+      })
+      .catch((err) => console.error('Duration contribution fetch failed:', err))
+      .finally(() => setDurationLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasTimeDimension, loading, results.length]);
+
+  const formatDurSec = (s: number | null): string => {
+    if (s === null || s === undefined) return '—';
+    const abs = Math.abs(s);
+    if (abs >= 86400) return `${(s / 86400).toFixed(1)} d`;
+    if (abs >= 3600) return `${(s / 3600).toFixed(1)} h`;
+    if (abs >= 60) return `${(s / 60).toFixed(1)} min`;
+    return `${s.toFixed(0)} s`;
+  };
 
   const maxAbsEffect = getMaxAbsEffect(results);
 
@@ -497,6 +541,110 @@ const CausalResults: React.FC = () => {
           </TableBody>
         </Table>
       </Box>
+
+      {/* ── Activity duration contribution section ── */}
+      {hasTimeDimension && (
+        <>
+          <Divider sx={{ my: 4 }} />
+          <Box display="flex" alignItems="center" gap={1} mb={1}>
+            <Typography variant="h5">Activity Duration Contribution</Typography>
+            <Tooltip
+              title="Shows which activities contribute to longer or shorter process duration when a deviation occurs. Duration per activity is approximated as the time gap to the next event (since only one timestamp per activity is typically recorded). Activities are sorted by the absolute difference between traces with and without the deviation."
+              arrow placement="right"
+            >
+              <IconButton size="small"><InfoIcon fontSize="small" color="action" /></IconButton>
+            </Tooltip>
+          </Box>
+          <Typography variant="body2" color="text.secondary" gutterBottom>
+            Average time from each activity until the next event, compared between cases with and without each deviation.
+          </Typography>
+
+          {durationLoading ? (
+            <Box display="flex" justifyContent="center" mt={3}>
+              <CircularProgress size={28} />
+            </Box>
+          ) : (
+            deviations.map((dev) => {
+              const devObj = selectedDeviations.find((d: any) => d.column === dev);
+              const label = devObj?.label ?? dev;
+              const rows: ActivityDurationRow[] = durationContributions[dev] || [];
+              if (rows.length === 0) return null;
+              const maxAbsDiff = Math.max(...rows.map((r) => Math.abs(r.difference ?? 0)), 1);
+              return (
+                <Box key={dev} mb={4}>
+                  <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
+                    {label}
+                  </Typography>
+                  <Box sx={{ overflowX: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
+                          <TableCell><strong>Activity</strong></TableCell>
+                          <TableCell align="right"><strong>Avg. with deviation</strong></TableCell>
+                          <TableCell align="right"><strong>Avg. without deviation</strong></TableCell>
+                          <TableCell align="right"><strong>Difference</strong></TableCell>
+                          <TableCell><strong>Impact</strong></TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {rows.map((row) => {
+                          const diff = row.difference;
+                          const barWidth = diff !== null ? (Math.abs(diff) / maxAbsDiff) * 100 : 0;
+                          const isLonger = diff !== null && diff > 0;
+                          return (
+                            <TableRow key={row.activity}>
+                              <TableCell>{row.activity}</TableCell>
+                              <TableCell align="right">
+                                {row.with_deviation !== null ? formatDurSec(row.with_deviation) : <span style={{ color: '#bbb' }}>—</span>}
+                              </TableCell>
+                              <TableCell align="right">
+                                {row.without_deviation !== null ? formatDurSec(row.without_deviation) : <span style={{ color: '#bbb' }}>—</span>}
+                              </TableCell>
+                              <TableCell align="right">
+                                {diff !== null ? (
+                                  <Chip
+                                    label={`${diff > 0 ? '+' : ''}${formatDurSec(diff)}`}
+                                    size="small"
+                                    sx={{
+                                      backgroundColor: isLonger ? 'rgba(211,47,47,0.12)' : 'rgba(76,175,80,0.12)',
+                                      color: isLonger ? '#c62828' : '#2e7d32',
+                                      fontWeight: 600,
+                                      fontSize: '0.72rem',
+                                    }}
+                                  />
+                                ) : <span style={{ color: '#bbb' }}>—</span>}
+                              </TableCell>
+                              <TableCell sx={{ minWidth: 120 }}>
+                                {diff !== null && (
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                    <Box
+                                      sx={{
+                                        height: 10,
+                                        width: `${barWidth}%`,
+                                        maxWidth: 100,
+                                        backgroundColor: isLonger ? 'rgba(211,47,47,0.6)' : 'rgba(76,175,80,0.6)',
+                                        borderRadius: 1,
+                                        minWidth: 2,
+                                      }}
+                                    />
+                                  </Box>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </Box>
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                    Red = activity takes longer when deviation is present (contributes to delay). Green = shorter.
+                  </Typography>
+                </Box>
+              );
+            })
+          )}
+        </>
+      )}
 
       {/* Criticality configurator */}
       <Box mt={6}>

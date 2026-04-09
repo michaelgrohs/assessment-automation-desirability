@@ -103,6 +103,7 @@ const SelectDimensions: React.FC = () => {
   const [showDevsInFormula, setShowDevsInFormula] = useState<Record<string, boolean>>({});
   const [matrixColumns, setMatrixColumns] = useState<string[]>([]);
   const [matrixRows, setMatrixRows] = useState<any[]>([]);
+  const [matrixError, setMatrixError] = useState<string | null>(null);
   const [allDeviationCols, setAllDeviationCols] = useState<Set<string>>(new Set());
   const [timeConstraintCols, setTimeConstraintCols] = useState<{col_name: string; label: string; time_condition: any}[]>([]);
 
@@ -110,10 +111,14 @@ const SelectDimensions: React.FC = () => {
     fetch(`${API_URL}/api/current-impact-matrix`)
       .then(res => res.json())
       .then(data => {
-        setMatrixColumns(data.columns ?? []);
-        setMatrixRows(data.rows ?? []);
+        if (data.error && (!data.columns || data.columns.length === 0)) {
+          setMatrixError(data.error);
+        } else {
+          setMatrixColumns(data.columns ?? []);
+          setMatrixRows(data.rows ?? []);
+        }
       })
-      .catch(() => {});
+      .catch(e => setMatrixError(`Could not reach backend: ${e.message}`));
     fetch(`${API_URL}/api/deviation-overview`)
       .then(res => res.json())
       .then(data => {
@@ -525,6 +530,10 @@ const SelectDimensions: React.FC = () => {
             </Typography>
           )}
         </Alert>
+      )}
+
+      {matrixError && (
+        <Alert severity="warning" sx={{ mb: 2 }}>{matrixError}</Alert>
       )}
 
       {availableDimensions.map(dim => (

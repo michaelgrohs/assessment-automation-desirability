@@ -1585,10 +1585,19 @@ def get_current_impact_matrix():
     else:
         df = get_cached_deviation_matrix()
 
+    if df is None or df.empty:
+        return jsonify({"error": "No data loaded. Please upload your files and complete the conformance analysis first.", "columns": [], "rows": [], "total_rows": 0, "total_columns": 0}), 200
+
+    # Separate list columns (e.g. activities) from scalar columns.
+    # df.to_json() handles NaN→null and numpy types correctly for scalar columns,
+    # but encodes list columns as nested JSON arrays which is also fine.
+    import json as _json
+    records = _json.loads(df.to_json(orient="records", default_handler=str))
+
     print(f"[current-impact-matrix] returning {df.shape[1]} cols: {list(df.columns)}")
     return jsonify({
         "columns": list(df.columns),
-        "rows": df.to_dict(orient="records"),
+        "rows": records,
         "total_rows": df.shape[0],
         "total_columns": df.shape[1]
     })
@@ -2966,6 +2975,186 @@ def get_workaround_patterns_endpoint():
         import traceback
         traceback.print_exc()
         return jsonify({'patterns': {}, 'merge_suggestions': [], 'error': str(e)})
+
+
+@app.route('/api/deviation-rules', methods=['GET'])
+def deviation_rules():
+    """
+    Fit a shallow decision tree on trace features to extract human-readable rules
+    that predict when a given deviation occurs. Returns rules, feature importance,
+    and base rate statistics.
+    """
+    from sklearn.tree import DecisionTreeClassifier, _tree
+    from sklearn.preprocessing import LabelEncoder
+
+    deviation = request.args.get('deviation', '')
+    if not deviation:
+        return jsonify({"error": "Missing 'deviation' parameter"}), 400
+
+    matrix = get_cached_deviation_matrix()
+    if matrix is None or matrix.empty:
+        return jsonify({"error": "No deviation matrix available"}), 400
+
+    if deviation not in matrix.columns:
+        return jsonify({"rules": [], "feature_importance": [], "total_traces": 0, "deviation_rate": 0})
+
+    # Feature columns: numeric non-deviation, non-metadata columns
+    skip_cols = {
+        'trace_id', 'activities', deviation,
+    }
+    feature_cols = []
+    for col in matrix.columns:
+        if col in skip_cols:
+            continue
+        unique_vals = set(matrix[col].dropna().unique())
+        if unique_vals.issubset({0, 1, 0.0, 1.0}) and col != deviation:
+            # Other deviation columns — skip to avoid circularity
+            continue
+        try:
+            matrix[col].astype(float)
+            feature_cols.append(col)
+        except (ValueError, TypeError):
+            pass
+
+    if not feature_cols:
+        return jsonify({"rules": [], "feature_importance": [], "total_traces": len(matrix), "deviation_rate": 0})
+
+    df = matrix[feature_cols + [deviation]].dropna()
+    if df.empty or df[deviation].nunique() < 2:
+        total = len(matrix)
+        rate = float(matrix[deviation].mean()) if deviation in matrix else 0.0
+        return jsonify({"rules": [], "feature_importance": [], "total_traces": total, "deviation_rate": rate})
+
+    X = df[feature_cols].astype(float)
+    y = df[deviation].astype(int)
+
+    clf = DecisionTreeClassifier(max_depth=4, min_samples_leaf=max(5, int(len(df) * 0.02)), random_state=42)
+    clf.fit(X, y)
+
+    # Extract rules from the fitted tree
+    tree = clf.tree_
+    feature_names = feature_cols
+
+    def recurse(node, conditions):
+        if tree.feature[node] == _tree.TREE_UNDEFINED:
+            # Leaf node
+            value = tree.value[node][0]
+            total_samples = int(value.sum())
+            positive = int(value[1]) if len(value) > 1 else 0
+            precision = positive / total_samples if total_samples > 0 else 0
+            coverage = total_samples / len(df)
+            prediction = int(clf.classes_[value.argmax()])
+            if prediction == 1 and len(conditions) > 0:
+                rules.append({
+                    "conditions": list(conditions),
+                    "prediction": prediction,
+                    "support": total_samples,
+                    "precision": round(precision, 3),
+                    "coverage": round(coverage, 3),
+                })
+            return
+        feat = feature_names[tree.feature[node]]
+        threshold = float(tree.threshold[node])
+        recurse(tree.children_left[node], conditions + [{"feature": feat, "op": "<=", "value": round(threshold, 4)}])
+        recurse(tree.children_right[node], conditions + [{"feature": feat, "op": ">", "value": round(threshold, 4)}])
+
+    rules = []
+    recurse(0, [])
+    rules.sort(key=lambda r: -r["precision"])
+
+    importance = [
+        {"feature": col, "importance": round(float(imp), 4)}
+        for col, imp in zip(feature_cols, clf.feature_importances_)
+        if imp > 0
+    ]
+    importance.sort(key=lambda x: -x["importance"])
+
+    return jsonify({
+        "rules": rules,
+        "feature_importance": importance,
+        "total_traces": len(df),
+        "deviation_rate": round(float(y.mean()), 4),
+        "n_features": len(feature_cols),
+    })
+
+
+@app.route('/api/activity-duration-contribution', methods=['POST'])
+def activity_duration_contribution():
+    """
+    For each requested deviation column, compute average activity durations for traces
+    with the deviation vs without. Activity duration is approximated as the time gap
+    between consecutive events in the same trace (since only one timestamp per activity).
+    """
+    req = request.get_json() or {}
+    deviations = req.get('deviations', [])
+
+    log = last_uploaded_data.get('filtered_log') or get_cached_xes_log()
+    # Prefer the grouped/aggregated matrix (matches causal result column names after issue grouping)
+    _agg = last_uploaded_data.get('aggregated_base_matrix')
+    matrix = _agg if (_agg is not None and not _agg.empty) else get_cached_deviation_matrix()
+
+    if log is None or matrix is None or (hasattr(matrix, 'empty') and matrix.empty):
+        return jsonify({"error": "No log or deviation matrix available"}), 400
+
+    # Build per-event records: case_id, activity, duration to next event (seconds)
+    records = []
+    for trace in log:
+        case_id = str(trace.attributes.get('concept:name', id(trace)))
+        events = list(trace)
+        for i, event in enumerate(events):
+            activity = str(event.get('concept:name', ''))
+            ts = event.get('time:timestamp')
+            duration_s = None
+            if ts is not None and i < len(events) - 1:
+                next_ts = events[i + 1].get('time:timestamp')
+                if next_ts is not None:
+                    try:
+                        duration_s = (next_ts - ts).total_seconds()
+                    except Exception:
+                        pass
+            records.append({'case_id': case_id, 'activity': activity, 'duration_s': duration_s})
+
+    events_df = pd.DataFrame(records)
+
+    # Normalise matrix index to string case IDs
+    mat = matrix.copy()
+    if 'trace_id' in mat.columns:
+        mat = mat.set_index('trace_id')
+    mat.index = mat.index.astype(str)
+
+    contributions = {}
+    for dev_col in deviations:
+        if dev_col not in mat.columns:
+            continue
+
+        affected_ids = set(mat[mat[dev_col] == 1].index)
+        unaffected_ids = set(mat[mat[dev_col] == 0].index)
+
+        aff = events_df[events_df['case_id'].isin(affected_ids)].dropna(subset=['duration_s'])
+        unaff = events_df[events_df['case_id'].isin(unaffected_ids)].dropna(subset=['duration_s'])
+
+        aff_avg = aff.groupby('activity')['duration_s'].mean()
+        unaff_avg = unaff.groupby('activity')['duration_s'].mean()
+
+        all_activities = set(aff_avg.index) | set(unaff_avg.index)
+
+        rows = []
+        for act in sorted(all_activities):
+            w = float(aff_avg[act]) if act in aff_avg.index else None
+            wo = float(unaff_avg[act]) if act in unaff_avg.index else None
+            diff = (w - wo) if (w is not None and wo is not None) else None
+            rows.append({
+                'activity': act,
+                'with_deviation': w,
+                'without_deviation': wo,
+                'difference': diff,
+            })
+
+        # Sort by absolute difference descending
+        rows.sort(key=lambda x: abs(x['difference']) if x['difference'] is not None else 0, reverse=True)
+        contributions[dev_col] = rows
+
+    return jsonify({'contributions': contributions})
 
 
 if __name__ == '__main__':
