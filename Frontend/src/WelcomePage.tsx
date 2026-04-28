@@ -21,6 +21,7 @@ import { useNavigate } from 'react-router-dom';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import { useBottomNav } from './BottomNavContext';
 import { useFileContext, ConformanceMode } from './FileContext';
+import ScreenInfoBox from './ScreenInfoBox';
 
 const API_URL = process.env.REACT_APP_API_URL || "http://localhost:1965";
 
@@ -337,6 +338,153 @@ const WelcomePage: React.FC = () => {
           </IconButton>
         </Tooltip>
       </Box>
+
+      <ScreenInfoBox
+        whatYouSee={
+          <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+            {[
+              ['Trace Alignment — Upload Model', 'Upload a BPMN or PNML process model + an event log. Deviations are found by aligning each trace to the model (skipped and inserted activities).'],
+              ['Trace Alignment — Mine Model', 'Upload an event log only. A process model is automatically discovered (Inductive Miner, Heuristics, or Alpha Miner) and used for trace alignment.'],
+              ['Declarative — Mine from Log', 'Upload an event log only. A declarative DECLARE model is mined. Choose constraint templates and a minimum support threshold.'],
+              ['Declarative — Upload Model', 'Upload an event log + a pre-existing .decl model file. Conformance is checked against the uploaded constraints.'],
+            ].map(([title, desc]) => (
+              <Typography key={title} component="li" variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                <strong>{title}:</strong> {desc}
+              </Typography>
+            ))}
+          </Box>
+        }
+        whatToDo="Select a conformance mode, upload the required files, and click Upload & Compute. Once processing completes and deviations are detected, the Next button will become active."
+        example={
+          mode === 'declarative' ? (
+            <Box>
+              <Typography variant="caption" sx={{ fontWeight: 700, display: 'block', mb: 0.5 }}>Example DECLARE constraint violation:</Typography>
+              <Box sx={{ p: 1, background: '#f5f5f5', borderRadius: 1, fontSize: 11, fontFamily: 'monospace', mb: 0.75 }}>
+                {'Constraint: Response(Submit Application, Approve)\n'}
+                {'Meaning:    After "Submit Application", "Approve" must eventually occur\n'}
+                {'Violation:  Case-042 — "Submit Application" occurred but "Approve" never followed\n'}
+                {'            → 38 cases affected (12% of log)'}
+              </Box>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                Declarative constraints capture expected ordering and co-occurrence rules. Violations indicate cases where the rule was not satisfied.
+              </Typography>
+            </Box>
+          ) : (
+            <Box>
+              <Typography variant="caption" sx={{ fontWeight: 700, display: 'block', mb: 0.75, color: '#5d4037' }}>
+                Example: Trace alignment against a process model
+              </Typography>
+
+              {/* Mini BPMN process model */}
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>Process model:</Typography>
+              <Box sx={{ overflowX: 'auto', mb: 1.5, borderRadius: 1, border: '1px solid #e0e0e0', background: '#fafafa', p: 1 }}>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 462 58" width="462" height="58" style={{ display: 'block' }}>
+                  <defs>
+                    <marker id="ex-arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                      <path d="M0,0 L6,3 L0,6 Z" fill="#888"/>
+                    </marker>
+                  </defs>
+                  {/* Start */}
+                  <circle cx="16" cy="29" r="10" fill="#4caf50"/>
+                  <line x1="26" y1="29" x2="35" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ex-arr)"/>
+                  {/* Register */}
+                  <rect x="36" y="14" width="82" height="30" rx="4" fill="#fff" stroke="#bdbdbd" strokeWidth="1.5"/>
+                  <text x="77" y="33" textAnchor="middle" fontSize="10" fill="#333" fontFamily="sans-serif">Register</text>
+                  <line x1="118" y1="29" x2="127" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ex-arr)"/>
+                  {/* Validate */}
+                  <rect x="128" y="14" width="82" height="30" rx="4" fill="#fff" stroke="#bdbdbd" strokeWidth="1.5"/>
+                  <text x="169" y="33" textAnchor="middle" fontSize="10" fill="#333" fontFamily="sans-serif">Validate</text>
+                  <line x1="210" y1="29" x2="219" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ex-arr)"/>
+                  {/* Approve */}
+                  <rect x="220" y="14" width="82" height="30" rx="4" fill="#fff" stroke="#bdbdbd" strokeWidth="1.5"/>
+                  <text x="261" y="33" textAnchor="middle" fontSize="10" fill="#333" fontFamily="sans-serif">Approve</text>
+                  <line x1="302" y1="29" x2="311" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ex-arr)"/>
+                  {/* Close */}
+                  <rect x="312" y="14" width="82" height="30" rx="4" fill="#fff" stroke="#bdbdbd" strokeWidth="1.5"/>
+                  <text x="353" y="33" textAnchor="middle" fontSize="10" fill="#333" fontFamily="sans-serif">Close</text>
+                  <line x1="394" y1="29" x2="403" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ex-arr)"/>
+                  {/* End */}
+                  <circle cx="416" cy="29" r="10" fill="none" stroke="#333" strokeWidth="3"/>
+                  <circle cx="416" cy="29" r="5" fill="#333"/>
+                </svg>
+              </Box>
+
+              {/* Alignment results */}
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>Alignment results per case:</Typography>
+
+              {/* Case 017 — skip */}
+              <Box sx={{ mb: 1 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600, color: '#c62828', display: 'block', mb: 0.4 }}>
+                  Case-017 — Skip detected (Validate missing from trace)
+                </Typography>
+                <Box sx={{ display: 'flex', gap: '3px' }}>
+                  {([
+                    { label: 'Register', type: 'sync' },
+                    { label: 'Validate', type: 'skip' },
+                    { label: 'Approve', type: 'sync' },
+                    { label: 'Close', type: 'sync' },
+                  ] as { label: string; type: string }[]).map((m, i) => (
+                    <Box key={i} sx={{
+                      flex: 1, border: '1px solid',
+                      borderColor: m.type === 'sync' ? '#a5d6a7' : '#ef9a9a',
+                      borderRadius: 1,
+                      background: m.type === 'sync' ? '#f1f8e9' : '#fce4ec',
+                      p: '4px 2px', textAlign: 'center',
+                    }}>
+                      <Typography variant="caption" sx={{ fontSize: 9.5, fontWeight: 600, display: 'block',
+                        color: m.type === 'sync' ? '#2e7d32' : '#c62828',
+                        textDecoration: m.type === 'skip' ? 'line-through' : 'none' }}>
+                        {m.label}
+                      </Typography>
+                      <Typography variant="caption" sx={{ fontSize: 8.5, display: 'block',
+                        color: m.type === 'sync' ? '#388e3c' : '#e53935' }}>
+                        {m.type === 'sync' ? 'sync' : '↑ SKIP'}
+                      </Typography>
+                    </Box>
+                  ))}
+                </Box>
+              </Box>
+
+              {/* Case 031 — insert */}
+              <Box sx={{ mb: 1 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600, color: '#1565c0', display: 'block', mb: 0.4 }}>
+                  Case-031 — Insertion detected (Review not in model)
+                </Typography>
+                <Box sx={{ display: 'flex', gap: '3px' }}>
+                  {([
+                    { label: 'Register', type: 'sync' },
+                    { label: 'Validate', type: 'sync' },
+                    { label: 'Review', type: 'insert' },
+                    { label: 'Approve', type: 'sync' },
+                    { label: 'Close', type: 'sync' },
+                  ] as { label: string; type: string }[]).map((m, i) => (
+                    <Box key={i} sx={{
+                      flex: 1, border: '1px solid',
+                      borderColor: m.type === 'sync' ? '#a5d6a7' : '#90caf9',
+                      borderRadius: 1,
+                      background: m.type === 'sync' ? '#f1f8e9' : '#e3f2fd',
+                      p: '4px 2px', textAlign: 'center',
+                    }}>
+                      <Typography variant="caption" sx={{ fontSize: 9.5, fontWeight: 600, display: 'block',
+                        color: m.type === 'sync' ? '#2e7d32' : '#1565c0' }}>
+                        {m.label}
+                      </Typography>
+                      <Typography variant="caption" sx={{ fontSize: 8.5, display: 'block',
+                        color: m.type === 'sync' ? '#388e3c' : '#1976d2' }}>
+                        {m.type === 'sync' ? 'sync' : '↓ INSERT'}
+                      </Typography>
+                    </Box>
+                  ))}
+                </Box>
+              </Box>
+
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                Green = synchronous move (model and trace agree). Red = skip (required by model, absent from trace). Blue = insertion (in trace but not in model).
+              </Typography>
+            </Box>
+          )
+        }
+      />
 
       <Stack spacing={3}>
         {/* Mode Toggle */}

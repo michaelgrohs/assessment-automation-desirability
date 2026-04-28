@@ -173,9 +173,19 @@ interface FileContextType {
   loggingErrorDeviations: string[];
   setLoggingErrorDeviations: React.Dispatch<React.SetStateAction<string[]>>;
 
-  // Deviations marked as model exceptions in Step 3 (excluded from causal analysis)
-  modelExceptionDeviations: string[];
-  setModelExceptionDeviations: React.Dispatch<React.SetStateAction<string[]>>;
+  // Deviations marked in Step 3 as process exceptions (valid but not in model)
+  processExceptionDeviations: string[];
+  setProcessExceptionDeviations: React.Dispatch<React.SetStateAction<string[]>>;
+  // Deviations marked in Step 3 as out-of-control (cannot be influenced)
+  outOfControlDeviations: string[];
+  setOutOfControlDeviations: React.Dispatch<React.SetStateAction<string[]>>;
+
+  // Affected trace counts per deviation (column name → count), populated from Step 3
+  deviationAffectedCounts: Record<string, number>;
+  setDeviationAffectedCounts: React.Dispatch<React.SetStateAction<Record<string, number>>>;
+  // Labels (human-readable names) per deviation column
+  deviationLabels: Record<string, string>;
+  setDeviationLabels: React.Dispatch<React.SetStateAction<Record<string, string>>>;
 
   // Issue grouping: maps deviation column → issue name (default = deviation label)
   deviationIssueMap: Record<string, string>;
@@ -231,7 +241,10 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
   const [amountConformanceData, setAmountConformanceData] = useState<any[]>([]);
   const [dimensionConfigs, setDimensionConfigs] = useState<Record<string, any>>({});
   const [loggingErrorDeviations, setLoggingErrorDeviations] = useState<string[]>([]);
-  const [modelExceptionDeviations, setModelExceptionDeviations] = useState<string[]>([]);
+  const [processExceptionDeviations, setProcessExceptionDeviations] = useState<string[]>([]);
+  const [outOfControlDeviations, setOutOfControlDeviations] = useState<string[]>([]);
+  const [deviationAffectedCounts, setDeviationAffectedCounts] = useState<Record<string, number>>({});
+  const [deviationLabels, setDeviationLabels] = useState<Record<string, string>>({});
   const [deviationIssueMap, setDeviationIssueMap] = useState<Record<string, string>>({});
   const [workaroundMap, setWorkaroundMap] = useState<Record<string, WorkaroundEntry>>({});
   const [issueRisksOpportunities, setIssueRisksOpportunities] = useState<Record<string, RiskOpportunity[]>>({});
@@ -301,7 +314,10 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
     setAttributeConformance({});
     setDimensionConfigs({});
     setLoggingErrorDeviations([]);
-    setModelExceptionDeviations([]);
+    setProcessExceptionDeviations([]);
+    setOutOfControlDeviations([]);
+    setDeviationAffectedCounts({});
+    setDeviationLabels({});
     setDeviationIssueMap({});
     setWorkaroundMap({});
     setIssueRisksOpportunities({});
@@ -331,7 +347,10 @@ export const FileProvider = ({ children }: { children: ReactNode }) => {
         selectedDimensions, setSelectedDimensions,
         dimensionConfigs, setDimensionConfigs,
         loggingErrorDeviations, setLoggingErrorDeviations,
-        modelExceptionDeviations, setModelExceptionDeviations,
+        processExceptionDeviations, setProcessExceptionDeviations,
+        outOfControlDeviations, setOutOfControlDeviations,
+        deviationAffectedCounts, setDeviationAffectedCounts,
+        deviationLabels, setDeviationLabels,
         deviationIssueMap, setDeviationIssueMap,
         workaroundMap, setWorkaroundMap,
         issueRisksOpportunities, setIssueRisksOpportunities,

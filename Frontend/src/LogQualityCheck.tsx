@@ -18,18 +18,16 @@ import {
   Button,
   Tooltip,
   IconButton,
-  Collapse,
   TextField,
 } from '@mui/material';
 import PlaylistRemoveIcon from '@mui/icons-material/PlaylistRemove';
 import InfoIcon from '@mui/icons-material/Info';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { useNavigate } from 'react-router-dom';
 import { useBottomNav } from './BottomNavContext';
 import { useFileContext } from './FileContext';
+import ScreenInfoBox from './ScreenInfoBox';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:1965';
 
@@ -112,7 +110,8 @@ const AttributeTable: React.FC<{ items: AttributeItem[] }> = ({ items }) => {
   if (items.length === 0)
     return <Typography variant="body2" color="text.secondary">No attributes found.</Typography>;
   return (
-    <Table size="small">
+    <Box sx={{ maxHeight: 340, overflowY: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
+    <Table size="small" stickyHeader>
       <TableHead>
         <TableRow>
           <TableCell>Attribute</TableCell>
@@ -140,6 +139,7 @@ const AttributeTable: React.FC<{ items: AttributeItem[] }> = ({ items }) => {
         ))}
       </TableBody>
     </Table>
+    </Box>
   );
 };
 
@@ -149,39 +149,50 @@ const OutlierTable: React.FC<{
   selected: Set<string>;
   onToggle: (id: string) => void;
 }> = ({ outliers, formatValue, selected, onToggle }) => (
-  <Table size="small">
-    <TableHead>
-      <TableRow>
-        <TableCell padding="checkbox">Exclude</TableCell>
-        <TableCell>Case ID</TableCell>
-        <TableCell align="right">Value</TableCell>
-        <TableCell align="right">Z-score</TableCell>
-      </TableRow>
-    </TableHead>
-    <TableBody>
-      {outliers.map((o) => (
-        <TableRow key={o.case_id} selected={selected.has(o.case_id)}>
-          <TableCell padding="checkbox">
-            <Checkbox
-              size="small"
-              checked={selected.has(o.case_id)}
-              onChange={() => onToggle(o.case_id)}
-            />
-          </TableCell>
-          <TableCell><Typography variant="body2">{o.case_id}</Typography></TableCell>
-          <TableCell align="right">{formatValue(o)}</TableCell>
+  <Box sx={{ maxHeight: 340, overflowY: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
+    <Table size="small" stickyHeader>
+      <TableHead>
+        <TableRow>
+          <TableCell padding="checkbox">Exclude</TableCell>
+          <TableCell>Case ID</TableCell>
+          <TableCell align="right">Value</TableCell>
           <TableCell align="right">
-            <Chip
-              label={o.z_score > 0 ? `+${o.z_score.toFixed(2)}σ` : `${o.z_score.toFixed(2)}σ`}
-              size="small"
-              color={Math.abs(o.z_score) > 5 ? 'error' : 'warning'}
-              variant="outlined"
-            />
+            <Tooltip
+              title="The Z-score measures how far a case's value is from the group average, in units of standard deviation (σ). A Z of +3 means this case is 3 standard deviations above average — statistically unusual in a normal distribution (only ~0.1% of cases). The higher |Z|, the more extreme the outlier. Negative Z means unusually short/few; positive Z means unusually long/many."
+              arrow placement="top"
+            >
+              <Box component="span" sx={{ cursor: 'help', borderBottom: '1px dashed #aaa' }}>
+                Z-score (σ)
+              </Box>
+            </Tooltip>
           </TableCell>
         </TableRow>
-      ))}
-    </TableBody>
-  </Table>
+      </TableHead>
+      <TableBody>
+        {outliers.map((o) => (
+          <TableRow key={o.case_id} selected={selected.has(o.case_id)}>
+            <TableCell padding="checkbox">
+              <Checkbox
+                size="small"
+                checked={selected.has(o.case_id)}
+                onChange={() => onToggle(o.case_id)}
+              />
+            </TableCell>
+            <TableCell><Typography variant="body2">{o.case_id}</Typography></TableCell>
+            <TableCell align="right">{formatValue(o)}</TableCell>
+            <TableCell align="right">
+              <Chip
+                label={o.z_score > 0 ? `+${o.z_score.toFixed(2)}σ` : `${o.z_score.toFixed(2)}σ`}
+                size="small"
+                color={Math.abs(o.z_score) > 5 ? 'error' : 'warning'}
+                variant="outlined"
+              />
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  </Box>
 );
 
 const LogQualityCheck: React.FC = () => {
@@ -200,9 +211,6 @@ const LogQualityCheck: React.FC = () => {
   // Outlier filter state
   const [selectedDurationOutliers, setSelectedDurationOutliers] = useState<Set<string>>(new Set());
   const [selectedLengthOutliers, setSelectedLengthOutliers] = useState<Set<string>>(new Set());
-  const [durationExpanded, setDurationExpanded] = useState(false);
-  const [lengthExpanded, setLengthExpanded] = useState(false);
-
   // Z-score threshold for bulk selection
   const [zThreshold, setZThreshold] = useState<number>(3);
 
@@ -210,15 +218,9 @@ const LogQualityCheck: React.FC = () => {
   const [variants, setVariants] = useState<VariantItem[]>([]);
   const [variantsLoading, setVariantsLoading] = useState(false);
   const [markedVariantKeys, setMarkedVariantKeys] = useState<Set<string>>(new Set());
-  const [variantsExpanded, setVariantsExpanded] = useState(false);
 
   const [applying, setApplying] = useState(false);
   const [applied, setApplied] = useState(false);
-
-  useEffect(() => {
-    setContinue({ label: 'Continue', onClick: () => navigate('/log-deviations') });
-    return () => setContinue(null);
-  }, [navigate, setContinue]);
 
   useEffect(() => {
     fetch(`${API_URL}/api/log-quality`)
@@ -325,6 +327,28 @@ const LogQualityCheck: React.FC = () => {
     selectedLengthOutliers.size +
     variantCasesSelected;
 
+  const handleContinue = async () => {
+    if (hasFiltersSelected) {
+      await handleApplyAndRecompute();
+    }
+    navigate('/log-deviations');
+  };
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    setContinue({
+      label: applying
+        ? 'Applying…'
+        : hasFiltersSelected
+        ? `Continue (remove ${totalSelected} case${totalSelected !== 1 ? 's' : ''})`
+        : 'Continue',
+      onClick: handleContinue,
+      disabled: applying,
+    });
+    return () => setContinue(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasFiltersSelected, applying, totalSelected]);
+
   if (loading) {
     return <Box display="flex" justifyContent="center" mt={6}><CircularProgress /></Box>;
   }
@@ -352,6 +376,10 @@ const LogQualityCheck: React.FC = () => {
           <IconButton size="small"><InfoIcon fontSize="small" color="action" /></IconButton>
         </Tooltip>
       </Box>
+      <ScreenInfoBox
+        whatYouSee="Quality metrics for your event log: total cases and events, attribute completeness scores, outlier traces (unusual length or frequency), and common activity sequences (variants). Warnings highlight potential data quality issues."
+        whatToDo="Review the metrics. If you see anomalous cases (very long/short traces, rare variants), mark them for exclusion — conformance results will be recomputed on the filtered log. Filtering is optional; click Continue to proceed without changes."
+      />
       <Typography variant="body2" color="text.secondary" gutterBottom>
         Filtering is optional. Cases you exclude here will be removed and conformance results will be
         recomputed before subsequent steps.
@@ -467,7 +495,7 @@ const LogQualityCheck: React.FC = () => {
             <Box display="flex" alignItems="center" gap={1} mb={1}>
               <Typography variant="h6">Outlier Detection</Typography>
               <Tooltip
-                title="Outliers are identified using the Z-score method. Cases whose duration or event count is more than N standard deviations from the mean are flagged. Use the threshold input below to adjust which cases are highlighted."
+                title="Outliers are based on trace duration (total case time) and event count. The Z-score measures how many standard deviations (σ) a case sits above or below the average. A Z of +3 means the case took 3σ longer than typical — statistically unusual. Traces with high positive Z often represent exceptional situations, system stalls, or recording gaps; it is generally good practice to exclude them so they do not skew the conformance results."
                 arrow placement="right"
               >
                 <IconButton size="small"><InfoIcon fontSize="small" color="action" /></IconButton>
@@ -479,6 +507,13 @@ const LogQualityCheck: React.FC = () => {
                 variant="outlined"
               />
             </Box>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+              The Z-score is computed from <strong>trace duration</strong> (how long a case took end-to-end)
+              and <strong>event count</strong> (how many recorded activities it has).
+              A Z of +3 means the case is 3 standard deviations above average — unusually long or complex.
+              Traces with very high positive Z often represent exceptional situations, system hangs, or
+              missing end-events, and are good candidates for exclusion before conformance analysis.
+            </Typography>
 
             {/* Z-score threshold controls */}
             <Box display="flex" alignItems="center" gap={2} mb={2} flexWrap="wrap">
@@ -514,74 +549,44 @@ const LogQualityCheck: React.FC = () => {
             {/* Duration outliers */}
             {data.duration_outliers.length > 0 && (
               <Box mt={1}>
-                <Box
-                  display="flex"
-                  alignItems="center"
-                  justifyContent="space-between"
-                  sx={{ cursor: 'pointer', mb: 0.5 }}
-                  onClick={() => setDurationExpanded((v) => !v)}
-                >
-                  <Box display="flex" alignItems="center" gap={1}>
-                    <Typography variant="subtitle2">
-                      Duration Outliers ({data.duration_outliers.length})
-                    </Typography>
-                    <Chip
-                      label={`${selectedDurationOutliers.size} selected`}
-                      size="small"
-                      color={selectedDurationOutliers.size > 0 ? 'primary' : 'default'}
-                    />
-                  </Box>
-                  <IconButton size="small">
-                    {durationExpanded
-                      ? <ExpandLessIcon fontSize="small" />
-                      : <ExpandMoreIcon fontSize="small" />}
-                  </IconButton>
-                </Box>
-                <Collapse in={durationExpanded}>
-                  <OutlierTable
-                    outliers={data.duration_outliers}
-                    formatValue={(o) => formatDuration(o.value_seconds ?? 0)}
-                    selected={selectedDurationOutliers}
-                    onToggle={(id) => toggleOutlier(id, setSelectedDurationOutliers)}
+                <Box display="flex" alignItems="center" gap={1} mb={0.5}>
+                  <Typography variant="subtitle2">
+                    Duration Outliers ({data.duration_outliers.length})
+                  </Typography>
+                  <Chip
+                    label={`${selectedDurationOutliers.size} selected`}
+                    size="small"
+                    color={selectedDurationOutliers.size > 0 ? 'primary' : 'default'}
                   />
-                </Collapse>
+                </Box>
+                <OutlierTable
+                  outliers={data.duration_outliers}
+                  formatValue={(o) => formatDuration(o.value_seconds ?? 0)}
+                  selected={selectedDurationOutliers}
+                  onToggle={(id) => toggleOutlier(id, setSelectedDurationOutliers)}
+                />
               </Box>
             )}
 
             {/* Length outliers */}
             {data.length_outliers.length > 0 && (
               <Box mt={2}>
-                <Box
-                  display="flex"
-                  alignItems="center"
-                  justifyContent="space-between"
-                  sx={{ cursor: 'pointer', mb: 0.5 }}
-                  onClick={() => setLengthExpanded((v) => !v)}
-                >
-                  <Box display="flex" alignItems="center" gap={1}>
-                    <Typography variant="subtitle2">
-                      Event Count Outliers ({data.length_outliers.length})
-                    </Typography>
-                    <Chip
-                      label={`${selectedLengthOutliers.size} selected`}
-                      size="small"
-                      color={selectedLengthOutliers.size > 0 ? 'primary' : 'default'}
-                    />
-                  </Box>
-                  <IconButton size="small">
-                    {lengthExpanded
-                      ? <ExpandLessIcon fontSize="small" />
-                      : <ExpandMoreIcon fontSize="small" />}
-                  </IconButton>
-                </Box>
-                <Collapse in={lengthExpanded}>
-                  <OutlierTable
-                    outliers={data.length_outliers}
-                    formatValue={(o) => `${o.value} events`}
-                    selected={selectedLengthOutliers}
-                    onToggle={(id) => toggleOutlier(id, setSelectedLengthOutliers)}
+                <Box display="flex" alignItems="center" gap={1} mb={0.5}>
+                  <Typography variant="subtitle2">
+                    Event Count Outliers ({data.length_outliers.length})
+                  </Typography>
+                  <Chip
+                    label={`${selectedLengthOutliers.size} selected`}
+                    size="small"
+                    color={selectedLengthOutliers.size > 0 ? 'primary' : 'default'}
                   />
-                </Collapse>
+                </Box>
+                <OutlierTable
+                  outliers={data.length_outliers}
+                  formatValue={(o) => `${o.value} events`}
+                  selected={selectedLengthOutliers}
+                  onToggle={(id) => toggleOutlier(id, setSelectedLengthOutliers)}
+                />
               </Box>
             )}
           </CardContent>
@@ -648,33 +653,20 @@ const LogQualityCheck: React.FC = () => {
               Select entire process variants (activity sequences) to exclude from further analysis.
             </Typography>
 
-            <Box
-              display="flex"
-              alignItems="center"
-              justifyContent="space-between"
-              sx={{ cursor: 'pointer', mb: 0.5 }}
-              onClick={() => setVariantsExpanded((v) => !v)}
-            >
-              <Box display="flex" alignItems="center" gap={1}>
-                <Typography variant="subtitle2">All Variants</Typography>
-                <Chip
-                  label={`${markedVariantKeys.size} selected`}
-                  size="small"
-                  color={markedVariantKeys.size > 0 ? 'primary' : 'default'}
-                />
-              </Box>
-              <IconButton size="small">
-                {variantsExpanded
-                  ? <ExpandLessIcon fontSize="small" />
-                  : <ExpandMoreIcon fontSize="small" />}
-              </IconButton>
+            <Box display="flex" alignItems="center" gap={1} mb={0.5}>
+              <Typography variant="subtitle2">All Variants</Typography>
+              <Chip
+                label={`${markedVariantKeys.size} selected`}
+                size="small"
+                color={markedVariantKeys.size > 0 ? 'primary' : 'default'}
+              />
             </Box>
 
-            <Collapse in={variantsExpanded}>
-              {variantsLoading ? (
-                <CircularProgress size={20} />
-              ) : (
-                <Table size="small">
+            {variantsLoading ? (
+              <CircularProgress size={20} />
+            ) : (
+              <Box sx={{ maxHeight: 340, overflowY: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
+                <Table size="small" stickyHeader>
                   <TableHead>
                     <TableRow>
                       <TableCell padding="checkbox">Exclude</TableCell>
@@ -716,8 +708,8 @@ const LogQualityCheck: React.FC = () => {
                     })}
                   </TableBody>
                 </Table>
-              )}
-            </Collapse>
+              </Box>
+            )}
           </CardContent>
         </Card>
       )}
@@ -726,10 +718,9 @@ const LogQualityCheck: React.FC = () => {
       {(hasAnomalies || hasOutliers || variants.length > 0) && (
         <Card sx={{ mb: 2 }}>
           <CardContent>
-            <Typography variant="h6" gutterBottom>Apply Filters &amp; Recompute</Typography>
+            <Typography variant="h6" gutterBottom>Filter Summary</Typography>
             <Typography variant="body2" color="text.secondary" gutterBottom>
-              Cases excluded here are removed from the event log. Conformance results and deviation
-              frequencies are recomputed on the remaining cases before subsequent steps.
+              Selected cases will be removed and conformance results recomputed when you click Continue.
             </Typography>
 
             {hasOutOfOrder && (
@@ -757,8 +748,7 @@ const LogQualityCheck: React.FC = () => {
 
             {(selectedDurationOutliers.size > 0 || selectedLengthOutliers.size > 0) && (
               <Typography variant="body2" sx={{ mt: 1 }}>
-                {selectedDurationOutliers.size + selectedLengthOutliers.size} outlier case(s)
-                selected above will be excluded.
+                {selectedDurationOutliers.size + selectedLengthOutliers.size} outlier case(s) selected above will be excluded.
               </Typography>
             )}
             {markedVariantKeys.size > 0 && (
@@ -766,28 +756,11 @@ const LogQualityCheck: React.FC = () => {
                 {markedVariantKeys.size} variant(s) selected — approx. {variantCasesSelected} case(s) will be excluded.
               </Typography>
             )}
-
-            <Box mt={2} display="flex" alignItems="center" gap={2} flexWrap="wrap">
-              <Button
-                variant="contained"
-                size="small"
-                onClick={handleApplyAndRecompute}
-                disabled={!hasFiltersSelected || applying}
-                startIcon={applying ? <CircularProgress size={14} color="inherit" /> : undefined}
-              >
-                {applying
-                  ? 'Recomputing…'
-                  : `Apply & Recompute${hasFiltersSelected ? ` (${totalSelected} cases)` : ''}`}
-              </Button>
-              {applied && (
-                <Chip
-                  label="Recomputed successfully"
-                  color="success"
-                  size="small"
-                  icon={<CheckCircleOutlineIcon />}
-                />
-              )}
-            </Box>
+            {applied && (
+              <Box mt={1}>
+                <Chip label="Recomputed successfully" color="success" size="small" icon={<CheckCircleOutlineIcon />} />
+              </Box>
+            )}
           </CardContent>
         </Card>
       )}

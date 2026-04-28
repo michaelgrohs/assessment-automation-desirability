@@ -17,6 +17,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { useBottomNav } from "./BottomNavContext";
+import ScreenInfoBox from "./ScreenInfoBox";
 
 const API_URL = process.env.REACT_APP_API_URL || "http://localhost:1965";
 
@@ -164,6 +165,11 @@ const CriticalityResults: React.FC = () => {
 
   return (
     <Box sx={{ width: "100%", margin: "0 auto", mt: 4 }}>
+      <ScreenInfoBox
+        whatYouSee="A colour-coded matrix of causal effects (ATE) for each issue × dimension combination. Each cell shows the criticality label based on the thresholds you set on the previous page (very negative → very positive)."
+        whatToDo="Review the overall pattern of impacts. Use this matrix as a summary before moving to risks & opportunities. If a classification looks wrong, go back and adjust the criticality thresholds in the previous step."
+      />
+
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={4}>
         <Box display="flex" alignItems="center">
           <Typography variant="h5">Criticality Overview</Typography>

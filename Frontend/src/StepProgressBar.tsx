@@ -15,6 +15,7 @@ const STEP4_ROUTES = ['/select-dimensions', '/causal-results', '/risks-opportuni
 const STEP4_1_ROUTES = ['/select-dimensions', '/causal-results', '/overview'];
 const STEP4_2_ROUTES = ['/risks-opportunities'];
 const STEP5_ROUTES = ['/recommendations'];
+const STEP6_ROUTES = ['/final-report'];
 
 const AGGREGATION_ROUTES = ['/issue-grouping', '/workaround-analysis'];
 
@@ -71,10 +72,11 @@ const StepProgressBar: React.FC = () => {
   const isAggregation = AGGREGATION_ROUTES.includes(pathname);
   const inStep4 = STEP4_ROUTES.includes(pathname);
   const inStep5 = STEP5_ROUTES.includes(pathname);
+  const inStep6 = STEP6_ROUTES.includes(pathname);
   // Unfold step 4 into 4.1/4.2 once the user reaches step 4 or beyond
-  const step4Expanded = inStep4 || inStep5;
+  const step4Expanded = inStep4 || inStep5 || inStep6;
 
-  const allPhase2Routes = [...STEP4_ROUTES, ...STEP5_ROUTES];
+  const allPhase2Routes = [...STEP4_ROUTES, ...STEP5_ROUTES, ...STEP6_ROUTES];
 
   const getPhase1State = (routes: string[]): 'done' | 'active' | 'pending' => {
     if (routes.includes(pathname)) return 'active';
@@ -88,16 +90,17 @@ const StepProgressBar: React.FC = () => {
 
   // Step-4 state helpers
   const step4CollapseState: 'done' | 'active' | 'pending' = inStep4 ? 'active' : inStep5 ? 'done' : 'pending';
-  const step41State: 'done' | 'active' | 'pending' = STEP4_1_ROUTES.includes(pathname) ? 'active' : (STEP4_2_ROUTES.includes(pathname) || inStep5) ? 'done' : 'pending';
-  const step42State: 'done' | 'active' | 'pending' = STEP4_2_ROUTES.includes(pathname) ? 'active' : inStep5 ? 'done' : 'pending';
-  const step5State: 'done' | 'active' | 'pending' = STEP5_ROUTES.includes(pathname) ? 'active' : 'pending';
+  const step41State: 'done' | 'active' | 'pending' = STEP4_1_ROUTES.includes(pathname) ? 'active' : (STEP4_2_ROUTES.includes(pathname) || inStep5 || inStep6) ? 'done' : 'pending';
+  const step42State: 'done' | 'active' | 'pending' = STEP4_2_ROUTES.includes(pathname) ? 'active' : (inStep5 || inStep6) ? 'done' : 'pending';
+  const step5State: 'done' | 'active' | 'pending' = STEP5_ROUTES.includes(pathname) ? 'active' : inStep6 ? 'done' : 'pending';
+  const step6State: 'done' | 'active' | 'pending' = STEP6_ROUTES.includes(pathname) ? 'active' : 'pending';
 
   const phase1Done = isAggregation || allPhase2Routes.includes(pathname);
   const aggregationState: 'done' | 'active' | 'pending' = isAggregation
     ? 'active'
     : allPhase2Routes.includes(pathname)
-    ? 'done'
-    : 'pending';
+      ? 'done'
+      : 'pending';
 
   return (
     <Box
@@ -214,12 +217,16 @@ const StepProgressBar: React.FC = () => {
             </Box>
             <Connector done={step5State !== 'pending' || step42State === 'done'} />
             <StepNode label="5. Recommendations" state={step5State} />
+            <Connector done={step6State !== 'pending' || step5State === 'done'} />
+            <StepNode label="6. Final Report" state={step6State} />
           </>
         ) : (
           <>
             <StepNode label="4. Evaluate Impact" state={step4CollapseState} />
             <Connector done={step5State !== 'pending'} />
             <StepNode label="5. Recommendations" state={step5State} />
+            <Connector done={step6State !== 'pending' || step5State === 'done'} />
+            <StepNode label="6. Final Report" state={step6State} />
           </>
         )}
       </Box>

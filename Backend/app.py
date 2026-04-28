@@ -1842,65 +1842,112 @@ def compute_causal_effects():
     print("Impact matrix shape:", df.shape)
     print("Columns:", df.columns.tolist())
 
+    # Determine trace-length column: prefer event_count, fall back to len(activities)
+    if 'event_count' in df.columns:
+        length_col = 'event_count'
+    elif 'activities' in df.columns:
+        df['_trace_length'] = df['activities'].apply(
+            lambda x: len(x) if isinstance(x, list) else 0
+        )
+        length_col = '_trace_length'
+    else:
+        length_col = None
+
+    import warnings
+
+    def _run_causal(data, dev, dim):
+        """Run linear-regression causal estimate. Returns (value, p_value) or raises."""
+        graph = f'digraph {{ "{dev}" -> "{dim}" }}'
+        model = dowhymodel(data=data, treatment=dev, outcome=dim, graph=graph)
+        estimand = model.identify_effect(proceed_when_unidentifiable=True)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            estimate = model.estimate_effect(
+                estimand, method_name="backdoor.linear_regression", test_significance=True
+            )
+            sig = estimate.test_stat_significance()
+        return float(estimate.value), (float(sig["p_value"]) if sig else None)
+
     results = []
+
+    # ── Pre-compute length-matched subset once per deviation ──────────────────
+    dev_subsets: dict = {}
+    for dev in selected_deviations:
+        if dev not in df.columns:
+            dev_subsets[dev] = (df, None)
+            continue
+        df_sub = df
+        length_range = None
+        if length_col is not None:
+            deviant_lengths = df[df[dev] == 1][length_col].dropna()
+            if len(deviant_lengths) > 0:
+                lo = int(deviant_lengths.min()) - 2
+                hi = int(deviant_lengths.max()) + 2
+                candidate = df[(df[length_col] >= lo) & (df[length_col] <= hi)]
+                if candidate[dev].nunique() >= 2 and len(candidate) >= 10:
+                    df_sub = candidate
+                    length_range = [lo, hi]
+                else:
+                    print(f"[CATE] {dev}: subset too small, CATE will equal ATE")
+        dev_subsets[dev] = (df_sub, length_range)
+        print(f"[CATE] {dev}: n={len(df_sub)}, length_range={length_range}")
 
     for dim in selected_dimensions:
         for dev in selected_deviations:
 
-            # Skip if columns missing
             if dev not in df.columns or dim not in df.columns:
                 continue
 
-            # Skip degenerate cases: zero variance in treatment or outcome causes
-            # statsmodels divide-by-zero warnings and meaningless estimates
-            if df[dev].nunique() < 2 or df[dim].nunique() < 2:
+            df_sub, length_range = dev_subsets[dev]
+
+            # ── Validate global dataset ───────────────────────────────────────
+            if df[dev].nunique() < 2:
                 results.append({
-                    "deviation": dev,
-                    "dimension": dim,
-                    "ate": 0.0,
-                    "p_value": 1.0,
-                    "error": "No variation in treatment or outcome — effect is undefined"
+                    "deviation": dev, "dimension": dim,
+                    "error": "Deviation has no variation — it never (or always) occurs."
+                })
+                continue
+            if df[dim].nunique() < 2:
+                unique_val = df[dim].dropna().unique()
+                val_str = str(unique_val[0]) if len(unique_val) > 0 else "unknown"
+                results.append({
+                    "deviation": dev, "dimension": dim,
+                    "error": f"Dimension '{dim}' has the same value ({val_str}) for every trace — check your dimension configuration."
                 })
                 continue
 
-            graph = f'digraph {{ "{dev}" -> "{dim}" }}'
-
+            # ── Global ATE (all traces) ───────────────────────────────────────
             try:
-                import warnings
-                model = dowhymodel(
-                    data=df,
-                    treatment=dev,
-                    outcome=dim,
-                    graph=graph
-                )
-
-                identified_estimand = model.identify_effect(
-                    proceed_when_unidentifiable=True
-                )
-
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=RuntimeWarning)
-                    estimate = model.estimate_effect(
-                        identified_estimand,
-                        method_name="backdoor.linear_regression",
-                        test_significance=True
-                    )
-                    significance = estimate.test_stat_significance()
-
-                results.append({
-                    "deviation": dev,
-                    "dimension": dim,
-                    "ate": float(estimate.value),
-                    "p_value": float(significance["p_value"]) if significance else None
-                })
-
-
+                ate_val, ate_p = _run_causal(df, dev, dim)
             except Exception as e:
-                results.append({
-                    "deviation": dev,
-                    "dimension": dim,
-                    "error": str(e)
-                })
+                results.append({"deviation": dev, "dimension": dim, "error": str(e)})
+                continue
+
+            # ── Length-conditioned CATE ───────────────────────────────────────
+            cate_val, cate_p, cate_error = None, None, None
+            if df_sub is not df:  # only when a real subset was found
+                if df_sub[dim].nunique() < 2:
+                    cate_error = f"Dimension '{dim}' has no variation in the length-matched subset."
+                else:
+                    try:
+                        cate_val, cate_p = _run_causal(df_sub, dev, dim)
+                    except Exception as e:
+                        cate_error = str(e)
+
+            results.append({
+                "deviation": dev,
+                "dimension": dim,
+                # Global ATE
+                "ate": ate_val,
+                "p_value": ate_p,
+                "n_traces": len(df),
+                # Length-conditioned CATE
+                "cate": cate_val,
+                "cate_p_value": cate_p,
+                "cate_n_traces": len(df_sub) if df_sub is not df else None,
+                "cate_length_range": length_range,
+                "cate_error": cate_error,
+            })
 
     last_uploaded_data["causal_results"] = results
     if not results:
@@ -2759,6 +2806,79 @@ def get_deviation_correlations():
     return jsonify({"correlations": correlations, "total_traces": total})
 
 
+@app.route('/api/deviation-itemsets', methods=['GET'])
+def get_deviation_itemsets():
+    """Return frequent itemsets (size >= 2) of deviations using Apriori."""
+    from itertools import combinations as _comb
+    matrix = get_cached_deviation_matrix()
+    mode = last_uploaded_data.get('mode', 'bpmn')
+    min_support = float(request.args.get('min_support', 0.03))
+
+    if matrix is None or matrix.empty:
+        return jsonify({"itemsets": [], "total_traces": 0})
+
+    non_meta = {
+        'trace_id', 'trace_duration_seconds', 'activities',
+        'event_count', 'rework_count', 'max_inter_event_gap_seconds',
+        'avg_inter_event_gap_seconds', 'unique_resource_count',
+    }
+
+    if mode == 'bpmn':
+        dev_cols = [c for c in matrix.columns if c.startswith('(Skip ') or c.startswith('(Insert ')]
+    else:
+        dev_cols = []
+        for col in matrix.columns:
+            if col in non_meta:
+                continue
+            unique_vals = set(matrix[col].dropna().unique())
+            if unique_vals.issubset({0, 1, 0.0, 1.0}):
+                dev_cols.append(col)
+
+    n = len(matrix)
+    min_count = max(1, int(n * min_support))
+
+    # Frequent 1-itemsets
+    freq_sets = set()
+    for col in dev_cols:
+        if int((matrix[col] == 1).sum()) >= min_count:
+            freq_sets.add(frozenset([col]))
+
+    all_itemsets = []
+    current_level = list(freq_sets)
+    k = 2
+
+    while current_level and k <= 8:
+        items_in_freq = sorted(set().union(*current_level))
+        candidates = [frozenset(c) for c in _comb(items_in_freq, k)]
+
+        next_level = []
+        for cand in candidates:
+            # Apriori pruning: every (k-1)-subset must be frequent
+            if not all(frozenset(s) in freq_sets for s in _comb(sorted(cand), k - 1)):
+                continue
+            cols = sorted(cand)
+            mask = matrix[cols[0]] == 1
+            for col in cols[1:]:
+                mask = mask & (matrix[col] == 1)
+            count = int(mask.sum())
+            if count >= min_count:
+                fs = frozenset(cand)
+                next_level.append(fs)
+                freq_sets.add(fs)
+                all_itemsets.append({
+                    'items': cols,
+                    'count': count,
+                    'percentage': round(count / n * 100, 1),
+                    'size': k,
+                })
+
+        current_level = next_level
+        k += 1
+
+    all_itemsets.sort(key=lambda x: (-x['percentage'], -x['size']))
+    return jsonify({"itemsets": all_itemsets, "total_traces": n})
+
+
 @app.route('/api/ollama/models', methods=['GET'])
 def api_ollama_models():
     import urllib.request
@@ -2812,8 +2932,10 @@ def api_llm_suggestion():
     top_rule = data.get('top_rule', None)
     model = data.get('model', 'llama3.2')
     all_activities = data.get('all_activities', [])
-    workaround = data.get('workaround', None)        # {actor_roles, misfit, goal, intended_dimensions}
+    workaround = data.get('workaround', None)        # {actor_roles, misfit, goal, pattern_type, intended_dimensions}
     risks_opportunities = data.get('risks_opportunities', [])  # [{type, horizon, description}]
+    causal_links = data.get('causal_links', {})      # {causes: [{issue, description}], caused_by: [{issue, description}]}
+    duration_contributions = data.get('duration_contributions', [])  # [{activity, with_deviation, without_deviation, difference}]
 
     effects_lines = "\n".join(
         f"  - {e['dimension']}: CATE={e['ate']:.3f} ({e['criticality']})"
@@ -2843,15 +2965,17 @@ Step 1 — Infer the process domain: Based on the activity names above, identify
         roles_str = ", ".join(workaround.get('actor_roles', [])) or "unspecified"
         misfit = workaround.get('misfit', '').strip()
         goal = workaround.get('goal', '').strip()
+        pattern_type = workaround.get('pattern_type') or None
         intended = workaround.get('intended_dimensions', [])
         intended_lines = "\n".join(
             f"    • {d['dimension']}: {d['description']}" for d in intended if d.get('description')
         ) or "    (none specified)"
+        pattern_line = f"\n  - Behavioural pattern type: {pattern_type}" if pattern_type else ""
         workaround_block = f"""
 Participant perspective (workaround analysis):
   - This deviation is a workaround performed by: {roles_str}
   - Stated misfit / reason: {misfit or '(not provided)'}
-  - Stated goal: {goal or '(not provided)'}
+  - Stated goal: {goal or '(not provided)'}{pattern_line}
   - Intended impact on dimensions (as reported by participants):
 {intended_lines}
 """
@@ -2865,6 +2989,32 @@ Participant perspective (workaround analysis):
         if risks_lines:
             risks_block = f"\nIdentified risks and opportunities:\n{risks_lines}\n"
 
+    links_block = ""
+    causes = causal_links.get('causes', [])
+    caused_by = causal_links.get('caused_by', [])
+    if causes or caused_by:
+        lines = []
+        for l in caused_by:
+            lines.append(f"  - Caused by: \"{l['issue']}\"" + (f" ({l['description']})" if l.get('description') else ""))
+        for l in causes:
+            lines.append(f"  - Causes: \"{l['issue']}\"" + (f" ({l['description']})" if l.get('description') else ""))
+        links_block = "\nIssue causal relationships:\n" + "\n".join(lines) + "\n"
+
+    duration_block = ""
+    if duration_contributions:
+        def _fmt(s):
+            if s is None: return "—"
+            if s >= 86400: return f"{s/86400:.1f} days"
+            if s >= 3600: return f"{s/3600:.1f} hrs"
+            if s >= 60: return f"{s/60:.1f} min"
+            return f"{s:.0f} s"
+        dur_lines = []
+        for r in duration_contributions[:15]:  # cap at 15 rows
+            diff = r.get('difference')
+            diff_str = f"{'+' if diff > 0 else ''}{_fmt(abs(diff))} {'slower' if diff > 0 else 'faster'}" if diff is not None else "—"
+            dur_lines.append(f"  - {r['activity']}: with={_fmt(r.get('with_deviation'))} / without={_fmt(r.get('without_deviation'))} / diff={diff_str}")
+        duration_block = "\nActivity duration contributions (time dimension):\n" + "\n".join(dur_lines) + "\n"
+
     prompt = f"""You are a process improvement consultant analyzing a business process.
 {activities_block}
 A process deviation called "{deviation}" has been detected.
@@ -2872,9 +3022,9 @@ Overall impact direction: {direction}.
 
 Measured causal effects on process dimensions (from data):
 {effects_lines}{rule_line}
-{workaround_block}{risks_block}
+{workaround_block}{risks_block}{links_block}{duration_block}
 Step 2 — Give 3 concise, actionable recommendations to {action}.
-Ground your recommendations in the inferred process domain, the specific activities involved, the participant perspective, and the identified risks/opportunities. Be specific and practical. Use bullet points. Do not repeat the input data."""
+Ground your recommendations in the inferred process domain, the specific activities involved, the participant perspective, the identified risks/opportunities, and any causal relationships to other issues. Be specific and practical. Use bullet points. Do not repeat the input data."""
 
     payload = json.dumps({
         "model": model,
@@ -3122,13 +3272,35 @@ def activity_duration_contribution():
         mat = mat.set_index('trace_id')
     mat.index = mat.index.astype(str)
 
+    # Determine trace-length column (same logic as compute-causal-effects)
+    if 'event_count' in mat.columns:
+        length_col = 'event_count'
+    elif 'activities' in mat.columns:
+        mat['_trace_length'] = mat['activities'].apply(
+            lambda x: len(x) if isinstance(x, list) else 0
+        )
+        length_col = '_trace_length'
+    else:
+        length_col = None
+
     contributions = {}
     for dev_col in deviations:
         if dev_col not in mat.columns:
             continue
 
-        affected_ids = set(mat[mat[dev_col] == 1].index)
-        unaffected_ids = set(mat[mat[dev_col] == 0].index)
+        # Apply same length-matching as CATE: filter to [min-2, max+2] of deviant traces
+        mat_sub = mat
+        if length_col is not None:
+            deviant_lengths = mat[mat[dev_col] == 1][length_col].dropna()
+            if len(deviant_lengths) > 0:
+                lo = int(deviant_lengths.min()) - 2
+                hi = int(deviant_lengths.max()) + 2
+                candidate = mat[(mat[length_col] >= lo) & (mat[length_col] <= hi)]
+                if candidate[dev_col].nunique() >= 2 and len(candidate) >= 10:
+                    mat_sub = candidate
+
+        affected_ids = set(mat_sub[mat_sub[dev_col] == 1].index)
+        unaffected_ids = set(mat_sub[mat_sub[dev_col] == 0].index)
 
         aff = events_df[events_df['case_id'].isin(affected_ids)].dropna(subset=['duration_s'])
         unaff = events_df[events_df['case_id'].isin(unaffected_ids)].dropna(subset=['duration_s'])

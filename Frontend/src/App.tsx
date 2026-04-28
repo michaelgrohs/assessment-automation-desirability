@@ -18,6 +18,7 @@ import RisksOpportunities from "./RisksOpportunities";
 import Recommendations from "./Recommendations";
 import ViolationGuidelines from "./ViolationGuidelines";
 import ActivityStats from "./ActivityStats";
+import FinalReport from "./FinalReport";
 
 const App: React.FC = () => {
   return (
@@ -42,6 +43,7 @@ const App: React.FC = () => {
             <Route path="/criticality-results" element={<CriticalityResults />} />
             <Route path="/risks-opportunities" element={<RisksOpportunities />} />
             <Route path="/recommendations" element={<Recommendations />} />
+            <Route path="/final-report" element={<FinalReport />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

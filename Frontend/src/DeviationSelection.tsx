@@ -6,6 +6,7 @@ import {
   CircularProgress,
   Alert,
   Chip,
+  Collapse,
   Divider,
   IconButton,
   Tooltip,
@@ -17,6 +18,8 @@ import {
   Button,
   Paper,
 } from '@mui/material';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import InfoIcon from '@mui/icons-material/Info';
 import PlaylistRemoveIcon from '@mui/icons-material/PlaylistRemove';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
@@ -24,6 +27,7 @@ import { useNavigate } from 'react-router-dom';
 import NavigatedViewer from 'bpmn-js/lib/NavigatedViewer';
 import { useBottomNav } from './BottomNavContext';
 import { useFileContext } from './FileContext';
+import ScreenInfoBox from './ScreenInfoBox';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:1965';
 
@@ -95,40 +99,46 @@ const typeColor: Record<string, string> = {
 };
 
 // ── Deviation card ─────────────────────────────────────────────────────────────
+type ExclusionType = 'process-exception' | 'out-of-control' | null;
+
 const DeviationCard: React.FC<{
   item: DeviationItem;
-  isModelException: boolean;
-  onToggleModelException: () => void;
-}> = ({ item, isModelException, onToggleModelException }) => {
+  exclusionType: ExclusionType;
+  onSetExclusion: (type: ExclusionType) => void;
+}> = ({ item, exclusionType, onSetExclusion }) => {
   const chipColor = typeColor[item.type] ?? '#555';
   const neverActivated = item.total_activations === 0;
   const diag = item.violation_diagnostics;
   const diagTotal = diag ? diag.no_target_count + diag.target_condition_failed_count + diag.time_window_violated_count : 0;
+  const isExcluded = exclusionType !== null;
 
   return (
     <Card
       variant="outlined"
       sx={{
         mb: 1.5,
-        borderColor: isModelException ? '#e0e0e0' : 'divider',
+        borderColor: isExcluded ? '#e0e0e0' : 'divider',
         backgroundColor: neverActivated ? '#fafafa' : undefined,
-        opacity: isModelException ? 0.7 : 1,
+        opacity: isExcluded ? 0.7 : 1,
       }}
     >
       <Box display="flex" alignItems="flex-start" px={2} py={1.5}>
         <Box flex={1}>
           <Box display="flex" alignItems="center" gap={1} flexWrap="wrap">
             <Typography variant="body1"
-              sx={{ textDecoration: isModelException ? 'line-through' : 'none', color: isModelException ? 'text.disabled' : undefined }}>
+              sx={{ textDecoration: isExcluded ? 'line-through' : 'none', color: isExcluded ? 'text.disabled' : undefined }}>
               {item.label}
             </Typography>
             <Chip
               label={item.type}
               size="small"
-              sx={{ backgroundColor: chipColor, color: '#fff', fontSize: '0.65rem', opacity: isModelException ? 0.5 : 1 }}
+              sx={{ backgroundColor: chipColor, color: '#fff', fontSize: '0.65rem', opacity: isExcluded ? 0.5 : 1 }}
             />
-            {isModelException && (
-              <Chip label="Model Exception" size="small" color="secondary" variant="outlined" sx={{ fontSize: '0.65rem' }} />
+            {exclusionType === 'process-exception' && (
+              <Chip label="Process Exception" size="small" variant="outlined" sx={{ fontSize: '0.65rem', borderColor: '#ef9a9a', color: '#c62828' }} />
+            )}
+            {exclusionType === 'out-of-control' && (
+              <Chip label="Out-of-control" size="small" variant="outlined" sx={{ fontSize: '0.65rem', borderColor: '#ce93d8', color: '#6a1b9a' }} />
             )}
           </Box>
 
@@ -229,20 +239,29 @@ const DeviationCard: React.FC<{
 
       {/* Violation bar */}
       <Box sx={{ height: 6, backgroundColor: '#eee' }}>
-        <Box sx={{ height: 6, width: `${item.affected_percentage}%`, backgroundColor: neverActivated ? '#ccc' : (isModelException ? '#bdbdbd' : '#ed6c02') }} />
+        <Box sx={{ height: 6, width: `${item.affected_percentage}%`, backgroundColor: neverActivated ? '#ccc' : (isExcluded ? '#bdbdbd' : '#ed6c02') }} />
       </Box>
 
-      {/* Model exception toggle */}
-      <Box px={2} py={1} sx={{ borderTop: '1px solid #f0f0f0' }}>
-        <Tooltip title={isModelException ? 'Unmark as model exception' : 'Mark as Model Exception — this violation is an artefact of an incomplete model, not a real process deviation. It will be excluded from causal analysis.'} arrow>
+      {/* Exclusion type buttons */}
+      <Box px={2} py={1} display="flex" gap={1} flexWrap="wrap" sx={{ borderTop: '1px solid #f0f0f0' }}>
+        <Tooltip title="A valid process variant that is not captured in the model but is allowed in principle. Excluded from further analysis." arrow>
           <Button
             size="small"
-            variant={isModelException ? 'contained' : 'outlined'}
-            color="secondary"
-            onClick={onToggleModelException}
-            sx={{ fontSize: '0.7rem' }}
+            variant={exclusionType === 'process-exception' ? 'contained' : 'outlined'}
+            onClick={() => onSetExclusion(exclusionType === 'process-exception' ? null : 'process-exception')}
+            sx={{ fontSize: '0.7rem', borderColor: '#ef9a9a', color: exclusionType === 'process-exception' ? '#fff' : '#c62828', backgroundColor: exclusionType === 'process-exception' ? '#c62828' : undefined, '&:hover': { backgroundColor: exclusionType === 'process-exception' ? '#b71c1c' : '#fce4ec' } }}
           >
-            {isModelException ? 'Model Exception ✓' : 'Mark as Model Exception'}
+            {exclusionType === 'process-exception' ? 'Process Exception ✓' : 'Process Exception'}
+          </Button>
+        </Tooltip>
+        <Tooltip title="A deviation you cannot influence or control (e.g. external constraint, system-forced behaviour). Excluded from further analysis." arrow>
+          <Button
+            size="small"
+            variant={exclusionType === 'out-of-control' ? 'contained' : 'outlined'}
+            onClick={() => onSetExclusion(exclusionType === 'out-of-control' ? null : 'out-of-control')}
+            sx={{ fontSize: '0.7rem', borderColor: '#ce93d8', color: exclusionType === 'out-of-control' ? '#fff' : '#6a1b9a', backgroundColor: exclusionType === 'out-of-control' ? '#6a1b9a' : undefined, '&:hover': { backgroundColor: exclusionType === 'out-of-control' ? '#4a148c' : '#f3e5f5' } }}
+          >
+            {exclusionType === 'out-of-control' ? 'Out-of-control ✓' : 'Out-of-control'}
           </Button>
         </Tooltip>
       </Box>
@@ -386,6 +405,74 @@ const ModelPanel: React.FC<{
   </Paper>
 );
 
+// ── Excluded deviations summary ───────────────────────────────────────────────
+const ExcludedSummary: React.FC<{
+  loggingErrors: string[];
+  processExceptions: string[];
+  outOfControl: string[];
+  allDeviations: DeviationItem[];
+  totalTraces: number;
+}> = ({ loggingErrors, processExceptions, outOfControl, allDeviations, totalTraces }) => {
+  const [open, setOpen] = React.useState(true);
+
+  const devMap = Object.fromEntries(allDeviations.map((d) => [d.column, d]));
+  const allExcluded = [
+    ...loggingErrors.map((c) => ({ col: c, tag: 'Logging Error', step: 'Step 1b', tagColor: '#b71c1c', tagBg: 'rgba(183,28,28,0.08)' })),
+    ...processExceptions.map((c) => ({ col: c, tag: 'Process Exception', step: 'Step 3', tagColor: '#c62828', tagBg: 'rgba(211,47,47,0.08)' })),
+    ...outOfControl.map((c) => ({ col: c, tag: 'Out-of-control', step: 'Step 3', tagColor: '#6a1b9a', tagBg: 'rgba(106,27,154,0.08)' })),
+  ];
+  if (allExcluded.length === 0) return null;
+
+  return (
+    <Box sx={{ mb: 2, border: '1px solid #e0e0e0', borderRadius: 1, overflow: 'hidden' }}>
+      <Box
+        display="flex" alignItems="center" gap={1} px={2} py={1}
+        sx={{ background: '#f5f5f5', cursor: 'pointer', userSelect: 'none' }}
+        onClick={() => setOpen(v => !v)}
+      >
+        <Typography variant="body2" sx={{ fontWeight: 600, flex: 1, color: '#555' }}>
+          {allExcluded.length} deviation(s) excluded from further analysis
+          {loggingErrors.length > 0 ? ` (${loggingErrors.length} identified as logging errors in Step 1b)` : ''}
+        </Typography>
+        <Chip label={`${loggingErrors.length} logging error(s)`} size="small" variant="outlined"
+          sx={{ fontSize: '0.6rem', borderColor: '#ef9a9a', color: '#b71c1c' }} />
+        <Chip label={`${processExceptions.length} process exception(s)`} size="small" variant="outlined"
+          sx={{ fontSize: '0.6rem', borderColor: '#ff8a65', color: '#c62828' }} />
+        <Chip label={`${outOfControl.length} out-of-control`} size="small" variant="outlined"
+          sx={{ fontSize: '0.6rem', borderColor: '#ce93d8', color: '#6a1b9a' }} />
+        <IconButton size="small" sx={{ p: 0 }}>
+          {open ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+        </IconButton>
+      </Box>
+      <Collapse in={open}>
+        <Box sx={{ px: 2, py: 1 }}>
+          {allExcluded.map(({ col, tag, step, tagColor, tagBg }) => {
+            const dev = devMap[col];
+            const pct = dev && totalTraces > 0 ? ((dev.affected_count / totalTraces) * 100).toFixed(1) : null;
+            return (
+              <Box key={col} display="flex" alignItems="center" gap={1} py={0.5}
+                sx={{ borderBottom: '1px solid #f0f0f0', '&:last-child': { borderBottom: 'none' } }}>
+                <Chip label={tag} size="small"
+                  sx={{ fontSize: '0.6rem', fontWeight: 700, height: 18, minWidth: 110, flexShrink: 0, backgroundColor: tagBg, color: tagColor }} />
+                <Chip label={step} size="small" variant="outlined"
+                  sx={{ fontSize: '0.58rem', height: 16, flexShrink: 0, color: '#888', borderColor: '#ccc' }} />
+                <Typography variant="caption" sx={{ flex: 1, fontWeight: 500 }}>
+                  {dev?.label ?? col}
+                </Typography>
+                {dev && (
+                  <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+                    {dev.affected_count.toLocaleString('en-US')} trace(s){pct ? ` (${pct}%)` : ''}
+                  </Typography>
+                )}
+              </Box>
+            );
+          })}
+        </Box>
+      </Collapse>
+    </Box>
+  );
+};
+
 // ── Main component ─────────────────────────────────────────────────────────────
 const DeviationSelection: React.FC = () => {
   const navigate = useNavigate();
@@ -393,11 +480,15 @@ const DeviationSelection: React.FC = () => {
   const {
     conformanceMode,
     loggingErrorDeviations,
-    modelExceptionDeviations,
-    setModelExceptionDeviations,
+    processExceptionDeviations, setProcessExceptionDeviations,
+    outOfControlDeviations, setOutOfControlDeviations,
+    setDeviationAffectedCounts,
+    setDeviationLabels,
     filterSummary,
     applyAndRecompute,
   } = useFileContext();
+
+  const modelExceptionDeviations = [...processExceptionDeviations, ...outOfControlDeviations];
 
   const [data, setData] = useState<DeviationSelectionData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -416,9 +507,7 @@ const DeviationSelection: React.FC = () => {
 
   const [applying, setApplying] = useState(false);
   const [applied, setApplied] = useState(false);
-  const [showAllVariants, setShowAllVariants] = useState(false);
   const [autoExcluded, setAutoExcluded] = useState<string[]>([]);
-  const VARIANTS_PREVIEW = 5;
 
   const isDeclarative = conformanceMode === 'declarative' || conformanceMode === 'declarative-model';
 
@@ -433,7 +522,18 @@ const DeviationSelection: React.FC = () => {
   useEffect(() => {
     fetch(`${API_URL}/api/deviation-selection`)
       .then((res) => res.json())
-      .then((d) => { setData(d); setLoading(false); })
+      .then((d) => {
+        setData(d);
+        setLoading(false);
+        const counts: Record<string, number> = {};
+        const labels: Record<string, string> = {};
+        (d.deviations || []).forEach((dev: any) => {
+          counts[dev.column] = dev.affected_count;
+          labels[dev.column] = dev.label ?? dev.column;
+        });
+        setDeviationAffectedCounts(counts);
+        setDeviationLabels(labels);
+      })
       .catch((err) => { setError(err.message); setLoading(false); });
 
     fetch(`${API_URL}/api/model-content`)
@@ -442,14 +542,14 @@ const DeviationSelection: React.FC = () => {
       .catch((err) => console.error('Failed to load model content:', err));
   }, []);
 
-  // Auto-exclude deviations with fewer than 10 affected cases
+  // Auto-exclude deviations with fewer than 10 affected cases → out-of-control
   useEffect(() => {
     if (!data) return;
     const lowCount = data.deviations
       .filter((d) => d.affected_count < 10 && !loggingErrorDeviations.includes(d.column))
       .map((d) => d.column);
     if (lowCount.length === 0) return;
-    setModelExceptionDeviations((prev) => {
+    setOutOfControlDeviations((prev) => {
       const toAdd = lowCount.filter((c) => !prev.includes(c));
       if (toAdd.length === 0) return prev;
       setAutoExcluded(toAdd);
@@ -519,9 +619,16 @@ const DeviationSelection: React.FC = () => {
     });
   };
 
-  const toggleModelException = (column: string) => {
-    setModelExceptionDeviations((prev) =>
-      prev.includes(column) ? prev.filter((c) => c !== column) : [...prev, column]
+  const setExclusionType = (column: string, type: ExclusionType) => {
+    setProcessExceptionDeviations((prev) =>
+      type === 'process-exception'
+        ? prev.includes(column) ? prev : [...prev, column]
+        : prev.filter((c) => c !== column)
+    );
+    setOutOfControlDeviations((prev) =>
+      type === 'out-of-control'
+        ? prev.includes(column) ? prev : [...prev, column]
+        : prev.filter((c) => c !== column)
     );
   };
 
@@ -587,9 +694,179 @@ const DeviationSelection: React.FC = () => {
           <IconButton size="small"><InfoIcon fontSize="small" color="action" /></IconButton>
         </Tooltip>
       </Box>
+      <ScreenInfoBox
+        whatYouSee="Every detected deviation with its occurrence count and diagnostic breakdown (no target, condition failed, time window violated). Each card shows the constraint or skip/insertion type, how many cases are affected, and why the violation occurred."
+        whatToDo={
+          <Typography variant="body2" color="text.secondary">
+            Review each deviation and decide whether to exclude it from causal analysis using one of two categories:
+            <br /><br />
+            <strong>Process Exceptions</strong> — variants not incorporated in the model but valid in principle (e.g., a rare but legitimate path that was simply not modelled). These are handled by the process but fall outside the documented model scope.
+            <br /><br />
+            <strong>Out-of-control Deviations</strong> — deviations you cannot influence or eliminate (e.g., externally imposed constraints, system-forced behaviour, errors beyond the team's control). Excluding these keeps the causal analysis focused on actionable deviations only.
+            <br /><br />
+            Deviations marked in either category are excluded from further analysis. Leave the rest active — they form the basis for the subsequent impact assessment.
+          </Typography>
+        }
+        example={
+          isDeclarative ? (
+            <Box>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                A <strong>Response(A, B)</strong> constraint says: if A occurs, B must eventually follow. A violation means B never occurred after A in that trace.
+              </Typography>
+              <Box sx={{ p: 1, background: '#f5f5f5', borderRadius: 1, fontSize: 11, fontFamily: 'monospace', mb: 1 }}>
+                Constraint: Response(Submit, Approve)<br/>
+                Violations: 47 cases — target "Approve" never reached
+              </Box>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.4 }}>
+                Some of these cases may be exceptions and should be excluded:
+              </Typography>
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                <Box sx={{ p: 0.75, background: 'rgba(106,27,154,0.06)', border: '1px solid #ce93d8', borderRadius: 1 }}>
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: '#6a1b9a', display: 'block' }}>Out-of-control:</Typography>
+                  <Typography variant="caption" color="text.secondary">The supplier demanded immediate payment before an approval could be issued — you have no authority over the supplier's payment terms.</Typography>
+                </Box>
+                <Box sx={{ p: 0.75, background: 'rgba(21,101,192,0.06)', border: '1px solid #90caf9', borderRadius: 1 }}>
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: '#1565c0', display: 'block' }}>Process exception:</Typography>
+                  <Typography variant="caption" color="text.secondary">Purchases from company-internal partners do not require a formal approval step — a valid path simply not captured in the model.</Typography>
+                </Box>
+              </Box>
+            </Box>
+          ) : (
+            <Box>
+              <Typography variant="caption" sx={{ fontWeight: 700, display: 'block', mb: 0.75, color: '#5d4037' }}>
+                Example: Trace alignment against a process model
+              </Typography>
+
+              {/* Mini BPMN process model */}
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>Process model:</Typography>
+              <Box sx={{ overflowX: 'auto', mb: 1.5, borderRadius: 1, border: '1px solid #e0e0e0', background: '#fafafa', p: 1 }}>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 556 58" width="556" height="58" style={{ display: 'block' }}>
+                  <defs>
+                    <marker id="ds-arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                      <path d="M0,0 L6,3 L0,6 Z" fill="#888"/>
+                    </marker>
+                  </defs>
+                  {/* Start */}
+                  <circle cx="16" cy="29" r="10" fill="#4caf50"/>
+                  <line x1="26" y1="29" x2="36" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ds-arr)"/>
+                  {/* Create PO */}
+                  <rect x="36" y="14" width="80" height="30" rx="4" fill="#fff" stroke="#bdbdbd" strokeWidth="1.5"/>
+                  <text x="76" y="33" textAnchor="middle" fontSize="10" fill="#333" fontFamily="sans-serif">Create PO</text>
+                  <line x1="116" y1="29" x2="126" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ds-arr)"/>
+                  {/* Validate */}
+                  <rect x="126" y="14" width="76" height="30" rx="4" fill="#fff" stroke="#bdbdbd" strokeWidth="1.5"/>
+                  <text x="164" y="33" textAnchor="middle" fontSize="10" fill="#333" fontFamily="sans-serif">Validate</text>
+                  <line x1="202" y1="29" x2="212" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ds-arr)"/>
+                  {/* Assign Tax Nr. */}
+                  <rect x="212" y="14" width="98" height="30" rx="4" fill="#fff" stroke="#bdbdbd" strokeWidth="1.5"/>
+                  <text x="261" y="33" textAnchor="middle" fontSize="10" fill="#333" fontFamily="sans-serif">Assign Tax Nr.</text>
+                  <line x1="310" y1="29" x2="320" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ds-arr)"/>
+                  {/* Approve */}
+                  <rect x="320" y="14" width="76" height="30" rx="4" fill="#fff" stroke="#bdbdbd" strokeWidth="1.5"/>
+                  <text x="358" y="33" textAnchor="middle" fontSize="10" fill="#333" fontFamily="sans-serif">Approve</text>
+                  <line x1="396" y1="29" x2="406" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ds-arr)"/>
+                  {/* Close */}
+                  <rect x="406" y="14" width="66" height="30" rx="4" fill="#fff" stroke="#bdbdbd" strokeWidth="1.5"/>
+                  <text x="439" y="33" textAnchor="middle" fontSize="10" fill="#333" fontFamily="sans-serif">Close</text>
+                  <line x1="472" y1="29" x2="482" y2="29" stroke="#888" strokeWidth="1.5" markerEnd="url(#ds-arr)"/>
+                  {/* End */}
+                  <circle cx="494" cy="29" r="10" fill="none" stroke="#333" strokeWidth="3"/>
+                  <circle cx="494" cy="29" r="5" fill="#333"/>
+                </svg>
+              </Box>
+
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>Alignment results per case:</Typography>
+
+              {/* Case 017 — skip of Validate */}
+              <Box sx={{ mb: 1 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600, color: '#c62828', display: 'block', mb: 0.4 }}>
+                  Case-017 — Skip detected (Validate missing from trace)
+                </Typography>
+                <Box sx={{ display: 'flex', gap: '3px' }}>
+                  {([
+                    { label: 'Create PO', type: 'sync' },
+                    { label: 'Validate', type: 'skip' },
+                    { label: 'Assign Tax Nr.', type: 'sync' },
+                    { label: 'Approve', type: 'sync' },
+                    { label: 'Close', type: 'sync' },
+                  ] as { label: string; type: string }[]).map((m, i) => (
+                    <Box key={i} sx={{
+                      flex: 1, border: '1px solid',
+                      borderColor: m.type === 'sync' ? '#a5d6a7' : '#ef9a9a',
+                      borderRadius: 1,
+                      background: m.type === 'sync' ? '#f1f8e9' : '#fce4ec',
+                      p: '4px 2px', textAlign: 'center',
+                    }}>
+                      <Typography variant="caption" sx={{ fontSize: 9, fontWeight: 600, display: 'block',
+                        color: m.type === 'sync' ? '#2e7d32' : '#c62828',
+                        textDecoration: m.type === 'skip' ? 'line-through' : 'none' }}>
+                        {m.label}
+                      </Typography>
+                      <Typography variant="caption" sx={{ fontSize: 8, display: 'block',
+                        color: m.type === 'sync' ? '#388e3c' : '#e53935' }}>
+                        {m.type === 'sync' ? 'sync' : '↑ SKIP'}
+                      </Typography>
+                    </Box>
+                  ))}
+                </Box>
+              </Box>
+
+              {/* Case 031 — skip of Assign Tax Nr. */}
+              <Box sx={{ mb: 1 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600, color: '#c62828', display: 'block', mb: 0.4 }}>
+                  Case-031 — Skip detected (Assign Tax Nr. missing from trace)
+                </Typography>
+                <Box sx={{ display: 'flex', gap: '3px' }}>
+                  {([
+                    { label: 'Create PO', type: 'sync' },
+                    { label: 'Validate', type: 'sync' },
+                    { label: 'Assign Tax Nr.', type: 'skip' },
+                    { label: 'Approve', type: 'sync' },
+                    { label: 'Close', type: 'sync' },
+                  ] as { label: string; type: string }[]).map((m, i) => (
+                    <Box key={i} sx={{
+                      flex: 1, border: '1px solid',
+                      borderColor: m.type === 'sync' ? '#a5d6a7' : '#ef9a9a',
+                      borderRadius: 1,
+                      background: m.type === 'sync' ? '#f1f8e9' : '#fce4ec',
+                      p: '4px 2px', textAlign: 'center',
+                    }}>
+                      <Typography variant="caption" sx={{ fontSize: 9, fontWeight: 600, display: 'block',
+                        color: m.type === 'sync' ? '#2e7d32' : '#c62828',
+                        textDecoration: m.type === 'skip' ? 'line-through' : 'none' }}>
+                        {m.label}
+                      </Typography>
+                      <Typography variant="caption" sx={{ fontSize: 8, display: 'block',
+                        color: m.type === 'sync' ? '#388e3c' : '#e53935' }}>
+                        {m.type === 'sync' ? 'sync' : '↑ SKIP'}
+                      </Typography>
+                    </Box>
+                  ))}
+                </Box>
+              </Box>
+
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75 }}>
+                Green = synchronous move. Red = skip (required by model, absent from trace).
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.4 }}>
+                Some of these cases may be exceptions and should be excluded:
+              </Typography>
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                <Box sx={{ p: 0.75, background: 'rgba(106,27,154,0.06)', border: '1px solid #ce93d8', borderRadius: 1 }}>
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: '#6a1b9a', display: 'block' }}>Out-of-control (Case-017, Skip of Validate):</Typography>
+                  <Typography variant="caption" color="text.secondary">The supplier requested an urgent delivery and skipped the standard validation — you have no authority over what the supplier demands.</Typography>
+                </Box>
+                <Box sx={{ p: 0.75, background: 'rgba(21,101,192,0.06)', border: '1px solid #90caf9', borderRadius: 1 }}>
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: '#1565c0', display: 'block' }}>Process exception (Case-031, Skip of Assign Tax Nr.):</Typography>
+                  <Typography variant="caption" color="text.secondary">Purchases from company-internal partners do not require a tax number assignment — a valid path simply not captured in the model.</Typography>
+                </Box>
+              </Box>
+            </Box>
+          )
+        }
+      />
       <Typography variant="body2" color="text.secondary" gutterBottom>
         {total_traces.toLocaleString('en-US')} total cases ·
-        All deviations not marked as model exceptions will proceed to analysis.
       </Typography>
 
       {/* Auto-exclusion banner */}
@@ -599,16 +876,15 @@ const DeviationSelection: React.FC = () => {
         </Alert>
       )}
 
-      {/* Status chips */}
-      {(loggingErrorDeviations.length > 0 || modelExceptionDeviations.length > 0) && (
-        <Box display="flex" gap={1} flexWrap="wrap" mt={1} mb={2}>
-          {loggingErrorDeviations.length > 0 && (
-            <Chip label={`${loggingErrorDeviations.length} logging error(s) excluded`} color="error" size="small" variant="outlined" />
-          )}
-          {modelExceptionDeviations.length > 0 && (
-            <Chip label={`${modelExceptionDeviations.length} model exception(s) excluded`} color="secondary" size="small" variant="outlined" />
-          )}
-        </Box>
+      {/* Excluded deviations summary — always visible */}
+      {(loggingErrorDeviations.length > 0 || processExceptionDeviations.length > 0 || outOfControlDeviations.length > 0) && data && (
+        <ExcludedSummary
+          loggingErrors={loggingErrorDeviations}
+          processExceptions={processExceptionDeviations}
+          outOfControl={outOfControlDeviations}
+          allDeviations={data.deviations}
+          totalTraces={data.total_traces}
+        />
       )}
 
       {/* Process model */}
@@ -626,8 +902,12 @@ const DeviationSelection: React.FC = () => {
             <DeviationCard
               key={item.column}
               item={item}
-              isModelException={modelExceptionDeviations.includes(item.column)}
-              onToggleModelException={() => toggleModelException(item.column)}
+              exclusionType={
+                processExceptionDeviations.includes(item.column) ? 'process-exception'
+                : outOfControlDeviations.includes(item.column) ? 'out-of-control'
+                : null
+              }
+              onSetExclusion={(type) => setExclusionType(item.column, type)}
             />
           ))}
 
@@ -653,7 +933,8 @@ const DeviationSelection: React.FC = () => {
             <Typography variant="body2" color="text.secondary">No variant data available.</Typography>
           ) : (
             <>
-            <Table size="small" sx={{ mb: 1 }}>
+            <Box sx={{ maxHeight: 340, overflowY: 'auto', border: '1px solid #e0e0e0', borderRadius: 1, mb: 1 }}>
+            <Table size="small" stickyHeader>
               <TableHead>
                 <TableRow>
                   <TableCell>#</TableCell>
@@ -665,7 +946,7 @@ const DeviationSelection: React.FC = () => {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {(showAllVariants ? allVariants : allVariants.slice(0, VARIANTS_PREVIEW)).map(([key, v], i) => (
+                {allVariants.map(([key, v], i) => (
                   <TableRow
                     key={key}
                     sx={{
@@ -714,19 +995,7 @@ const DeviationSelection: React.FC = () => {
                 ))}
               </TableBody>
             </Table>
-            {allVariants.length > VARIANTS_PREVIEW && (
-              <Box display="flex" justifyContent="center" mt={1} mb={1}>
-                <Button
-                  size="small"
-                  variant="text"
-                  onClick={() => setShowAllVariants((v) => !v)}
-                >
-                  {showAllVariants
-                    ? 'Show fewer variants'
-                    : `Show all ${allVariants.length} variants (${allVariants.length - VARIANTS_PREVIEW} more)`}
-                </Button>
-              </Box>
-            )}
+            </Box>
             </>
           )}
 

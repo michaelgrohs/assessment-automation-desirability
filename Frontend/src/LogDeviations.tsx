@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Box,
   Typography,
@@ -10,6 +10,7 @@ import {
   Chip,
   Divider,
   IconButton,
+  Paper,
   Tooltip,
   Table,
   TableHead,
@@ -27,8 +28,15 @@ import BugReportIcon from '@mui/icons-material/BugReport';
 import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import { useNavigate } from 'react-router-dom';
+import NavigatedViewer from 'bpmn-js/lib/NavigatedViewer';
 import { useBottomNav } from './BottomNavContext';
 import { useFileContext } from './FileContext';
+
+interface ModelContent {
+  type: 'bpmn' | 'pnml' | 'declarative' | 'declarative-model';
+  content?: string;
+  constraints?: any[];
+}
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:1965';
 
@@ -275,7 +283,7 @@ const DeviationCard: React.FC<{
         </ToggleButtonGroup>
         {action === 'ignore' && (
           <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
-            This deviation will be hidden in Step 3. No cases are removed.
+            This deviation will be hidden in the further analysis. No cases are removed.
           </Typography>
         )}
         {action === 'remove' && (
@@ -297,7 +305,8 @@ const DeviationCard: React.FC<{
               <Typography variant="subtitle2" gutterBottom>
                 Top variants containing this deviation
               </Typography>
-              <Table size="small">
+              <Box sx={{ maxHeight: 340, overflowY: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
+              <Table size="small" stickyHeader>
                 <TableHead>
                   <TableRow>
                     <TableCell>#</TableCell>
@@ -328,6 +337,7 @@ const DeviationCard: React.FC<{
                   ))}
                 </TableBody>
               </Table>
+              </Box>
             </>
           )}
         </CardContent>
@@ -346,9 +356,13 @@ const LogDeviations: React.FC = () => {
   const [data, setData] = useState<DeviationData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [modelContent, setModelContent] = useState<ModelContent | null>(null);
+  const [modelOpen, setModelOpen] = useState(true);
+  const bpmnContainerRef = useRef<HTMLDivElement | null>(null);
+  const viewerRef = useRef<any>(null);
 
   // Track action per deviation column
-  const [deviationActions, setDeviationActions] = useState<Record<string, DeviationAction>>({});
+  const [deviationActions, setDeviationActions] = useState<Record<string, DeviationAction>>({})
 
   const [applying, setApplying] = useState(false);
   const [applied, setApplied] = useState(false);
@@ -364,7 +378,29 @@ const LogDeviations: React.FC = () => {
       .then((res) => res.json())
       .then((d) => { setData(d); setLoading(false); })
       .catch((err) => { setError(err.message); setLoading(false); });
+
+    fetch(`${API_URL}/api/model-content`)
+      .then((res) => res.json())
+      .then((d) => setModelContent(d))
+      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (modelContent?.type !== 'bpmn' || !modelContent.content) return;
+    const timer = setTimeout(() => {
+      if (!bpmnContainerRef.current) return;
+      if (viewerRef.current) viewerRef.current.destroy();
+      const viewer = new NavigatedViewer({ container: bpmnContainerRef.current });
+      viewerRef.current = viewer;
+      viewer.importXML(modelContent.content!).then(() => {
+        setTimeout(() => { try { (viewer.get('canvas') as any).zoom('fit-viewport'); } catch (_) {} }, 100);
+      }).catch((e: any) => console.error('BPMN render error:', e));
+    }, 80);
+    return () => {
+      clearTimeout(timer);
+      if (viewerRef.current) { viewerRef.current.destroy(); viewerRef.current = null; }
+    };
+  }, [modelContent, modelOpen]);
 
   // Initialise action map from context on first data load
   useEffect(() => {
@@ -454,17 +490,72 @@ const LogDeviations: React.FC = () => {
       <Box display="flex" alignItems="center" gap={1} mb={1}>
         <Typography variant="h5" fontWeight="bold">Step 1b: Identify Logging Error Deviations</Typography>
         <Tooltip
-          title="Some deviations may not reflect genuine process exceptions but rather logging errors — e.g., activities that were performed but not recorded. Per deviation you can: Ignore it (hidden in Step 3, no cases removed) or Remove All Cases (all affected cases are filtered out and alignments are recomputed)."
+          title="These are all deviations found in your log. Some may not reflect genuine process exceptions but rather logging errors — e.g., activities that were performed but not recorded. Per deviation you can: Ignore it (excluded from further analysis, no cases removed) or Remove All Cases (all affected cases are filtered out and alignments are recomputed)."
           arrow placement="right"
         >
           <IconButton size="small"><InfoIcon fontSize="small" color="action" /></IconButton>
         </Tooltip>
       </Box>
       <Typography variant="body2" color="text.secondary" gutterBottom>
-        For each deviation, choose an action. "Ignore" hides it from Step 3 without removing cases.
-        "Remove All Cases" filters out every case that contains this deviation and triggers
-        alignment recomputation.
+        These are <strong>all deviations identified during conformance checking</strong>. Before proceeding to
+        in-depth analysis, decide for each deviation whether it represents a genuine deviation, a logging
+        artefact, or should have its cases removed entirely.
+        "Ignore" excludes a deviation from further analysis without removing cases.
+        "Remove All Cases" filters out every affected case and recomputes alignments.
       </Typography>
+
+      {/* Process model panel */}
+      {modelContent && (
+        <Paper variant="outlined" sx={{ mb: 2, mt: 1, overflow: 'hidden' }}>
+          <Box
+            display="flex" alignItems="center" px={2} py={1}
+            sx={{ background: '#f5f5f5', cursor: 'pointer', userSelect: 'none' }}
+            onClick={() => setModelOpen(v => !v)}
+          >
+            <Typography variant="subtitle2" sx={{ flex: 1 }}>Process Model</Typography>
+            <IconButton size="small" sx={{ p: 0 }}>
+              {modelOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+            </IconButton>
+          </Box>
+          <Collapse in={modelOpen}>
+            <Box
+              ref={bpmnContainerRef}
+              sx={{
+                width: '100%', height: 300, border: 'none', overflow: 'hidden',
+                display: modelContent.type === 'bpmn' ? 'block' : 'none',
+              }}
+            />
+            {modelContent.type === 'pnml' && modelContent.content && (
+              <Box sx={{ width: '100%', maxHeight: 300, overflowY: 'auto', p: 1,
+                '& svg': { width: '100%', height: 'auto' } }}
+                dangerouslySetInnerHTML={{ __html: modelContent.content }}
+              />
+            )}
+            {(modelContent.type === 'declarative' || modelContent.type === 'declarative-model') && modelContent.constraints?.length && (
+              <Box sx={{ overflowX: 'auto', maxHeight: 300, overflowY: 'auto', p: 1 }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Type</TableCell>
+                      <TableCell>Activity A</TableCell>
+                      <TableCell>Activity B</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {modelContent.constraints.map((c: any, i: number) => (
+                      <TableRow key={i}>
+                        <TableCell sx={{ fontSize: 11 }}>{c.type}</TableCell>
+                        <TableCell sx={{ fontSize: 11 }}>{c.op_0}</TableCell>
+                        <TableCell sx={{ fontSize: 11 }}>{c.op_1 || '—'}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Box>
+            )}
+          </Collapse>
+        </Paper>
+      )}
 
       {autoPreselected.length > 0 && (
         <Alert severity="info" sx={{ mt: 1.5, mb: 1 }}>
@@ -575,8 +666,7 @@ const LogDeviations: React.FC = () => {
 
           {ignoreCount > 0 && (
             <Alert severity="info" sx={{ mt: 2 }}>
-              <strong>{ignoreCount}</strong> deviation(s) marked as logging errors will be hidden
-              in Step 3 and excluded from causal analysis. No cases are removed for these.
+              <strong>{ignoreCount}</strong> deviation(s) marked as logging errors will be excluded from further analysis. No cases are removed for these.
             </Alert>
           )}
         </>

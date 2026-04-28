@@ -33,6 +33,7 @@ import { useNavigate } from "react-router-dom";
 import { useEffect } from 'react';
 import { useBottomNav } from './BottomNavContext';
 import { useFileContext } from './FileContext';
+import ScreenInfoBox from './ScreenInfoBox';
 const API_URL = process.env.REACT_APP_API_URL || "http://localhost:1965";
 
 type Dimension = "time" | "costs" | "quality" | "outcome" | "compliance";
@@ -496,6 +497,19 @@ const SelectDimensions: React.FC = () => {
   return (
     <Box sx={{ width: "100%", margin: "0 auto", mt: 5 }}>
 
+      <ScreenInfoBox
+        whatYouSee="A dimension selector with five options (time, costs, quality, outcome, compliance) and a configuration panel for each selected dimension. The panel lets you map the dimension to an existing log attribute, compute it via a formula, or define it as a binary rule."
+        whatToDo="Select the dimensions relevant to your analysis. For each, choose how it is computed — pick an existing numeric column, write a formula, or define a threshold rule. Click Compute Dimensions, then Continue to run causal analysis."
+        example={
+          <Box sx={{ fontSize: 12, color: '#555' }}>
+            <strong>Time:</strong> use existing column <em>trace_duration_seconds</em><br/>
+            <strong>Costs:</strong> formula <em>amount * quantity</em><br/>
+            <strong>Quality:</strong> binary rule — <em>rework_count &lt; 1</em> → 1 (good), else 0<br/>
+            <strong>Outcome:</strong> binary rule — activity <em>Closed</em> present → 1
+          </Box>
+        }
+      />
+
       <Box display="flex" alignItems="center" mb={2}>
         <Typography variant="h5">Select Impact Dimensions</Typography>
         <Tooltip
@@ -545,7 +559,7 @@ const SelectDimensions: React.FC = () => {
                 onChange={() => toggleDimension(dim)}
               />
             }
-            label={dim}
+            label={dim.charAt(0).toUpperCase() + dim.slice(1)}
           />
         </Tooltip>
       ))}
@@ -557,7 +571,7 @@ const SelectDimensions: React.FC = () => {
           <CardContent>
 
             <Typography variant="h6">
-              Configure: {dim}
+              Configure: {dim.charAt(0).toUpperCase() + dim.slice(1)}
             </Typography>
 
             {/* ── Description + Quick-apply suggestions ── */}
